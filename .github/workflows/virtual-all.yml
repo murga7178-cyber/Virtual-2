@@ -26,6 +26,14 @@ jobs:
       run: |
         git clone --depth 1 https://github.com/ALEX5402/NewBlackbox.git "$RUNNER_TEMP/bb"
 
+    - name: Inspect BlackBox device-info code
+      run: |
+        cd "$RUNNER_TEMP/bb"
+        echo "===== FILES (device info) ====="
+        grep -rIl -i "ANDROID_ID\|getDeviceId\|getImei\|DeviceConfig\|getMacAddress" Bcore/src --include=*.java --include=*.kt | head -40 || true
+        echo "===== LINES ====="
+        grep -rIn -i "ANDROID_ID\|getDeviceId\|getImei\|DeviceConfig" Bcore/src --include=*.java --include=*.kt | head -60 || true
+
     - name: Generate our app files
       run: |
         mkdir -p "$RUNNER_TEMP/vapp"
@@ -56,6 +64,13 @@ jobs:
                         <category android:name="android.intent.category.LAUNCHER" />
                     </intent-filter>
                 </activity>
+
+                <activity
+                    android:name=".LaunchActivity"
+                    android:exported="true"
+                    android:excludeFromRecents="true"
+                    android:taskAffinity=""
+                    android:theme="@android:style/Theme.Translucent.NoTitleBar" />
 
             </application>
         </manifest>
@@ -112,7 +127,7 @@ jobs:
 
                 if (app.isAdded && app.fakeAndroidId != null) {
                     holder.fakeId.visibility = View.VISIBLE
-                    holder.fakeId.text = "Android ID: ${app.fakeAndroidId}"
+                    holder.fakeId.text = "✔ जुड़ा हुआ · Android ID: ${app.fakeAndroidId}"
                 } else {
                     holder.fakeId.visibility = View.GONE
                 }
@@ -128,7 +143,63 @@ jobs:
         }
         VAPP_EOF_2
         mkdir -p "app/src/main/java/com/example/virtualapp"
-        cat > "app/src/main/java/com/example/virtualapp/MainActivity.kt" <<'VAPP_EOF_3'
+        cat > "app/src/main/java/com/example/virtualapp/LaunchActivity.kt" <<'VAPP_EOF_3'
+        package com.example.virtualapp
+
+        import android.app.Activity
+        import android.os.Bundle
+        import android.widget.Toast
+        import top.niunaijun.blackbox.BlackBoxCore
+
+        // होम स्क्रीन शॉर्टकट से सीधे वर्चुअल ऐप खोलने वाली बिना-स्क्रीन की Activity
+        class LaunchActivity : Activity() {
+
+            override fun onCreate(savedInstanceState: Bundle?) {
+                super.onCreate(savedInstanceState)
+                val pkg = intent.getStringExtra(EXTRA_PKG)
+                if (pkg == null) {
+                    finish()
+                    return
+                }
+                val appCtx = applicationContext
+                Thread {
+                    try {
+                        val userId = MyApplication.VIRTUAL_USER_ID
+                        // पहले सीधे खोलने की कोशिश (वर्चुअल कॉपी पहले से हो तो असली ऐप ज़रूरी नहीं)
+                        var ok = try {
+                            BlackBoxCore.get().launchApk(pkg, userId)
+                        } catch (e: Throwable) {
+                            false
+                        }
+                        if (!ok) {
+                            BlackBoxCore.get().installPackageAsUser(pkg, userId)
+                            ok = BlackBoxCore.get().launchApk(pkg, userId)
+                        }
+                        if (!ok) {
+                            runOnUiThread {
+                                Toast.makeText(appCtx, "ऐप नहीं खुल पाया", Toast.LENGTH_LONG).show()
+                            }
+                        }
+                    } catch (e: Throwable) {
+                        runOnUiThread {
+                            Toast.makeText(
+                                appCtx,
+                                "नहीं खुला: ${e.javaClass.simpleName}: ${e.message}",
+                                Toast.LENGTH_LONG
+                            ).show()
+                        }
+                    }
+                    runOnUiThread { finish() }
+                }.start()
+            }
+
+            companion object {
+                const val EXTRA_PKG = "pkg"
+            }
+        }
+        VAPP_EOF_3
+        mkdir -p "app/src/main/java/com/example/virtualapp"
+        cat > "app/src/main/java/com/example/virtualapp/MainActivity.kt" <<'VAPP_EOF_4'
         package com.example.virtualapp
 
         import android.app.AlertDialog
@@ -138,9 +209,15 @@ jobs:
         import android.content.Intent
         import android.content.pm.ApplicationInfo
         import android.content.pm.PackageManager
+        import android.graphics.Bitmap
+        import android.graphics.Canvas
+        import android.graphics.drawable.Drawable
         import android.os.Bundle
         import android.widget.Toast
         import androidx.appcompat.app.AppCompatActivity
+        import androidx.core.content.pm.ShortcutInfoCompat
+        import androidx.core.content.pm.ShortcutManagerCompat
+        import androidx.core.graphics.drawable.IconCompat
         import androidx.recyclerview.widget.LinearLayoutManager
         import androidx.recyclerview.widget.RecyclerView
         import com.example.virtualapp.data.FakeIdentity
@@ -198,6 +275,7 @@ jobs:
                     }
                 }
 
+                apps.sortWith(compareByDescending<AppInfo> { it.isAdded }.thenBy { it.name.lowercase() })
                 adapter.notifyDataSetChanged()
             }
 
@@ -216,17 +294,63 @@ jobs:
                 )
             }
 
-            // Tap → पूरी identity दिखाओ
+            // Tap → विकल्प की सूची
             private fun onAppClicked(app: AppInfo) {
                 val identity = IdentityStore.getOrCreate(this, app.packageName)
-
                 app.isAdded = true
                 app.fakeAndroidId = identity.androidId
                 adapter.notifyDataSetChanged()
 
-                MyApplication.copyApkToVirtual(this, app.packageName)
+                val options = arrayOf(
+                    "▶ वर्चुअल में चलाएँ",
+                    "🏠 होम स्क्रीन पर जोड़ें",
+                    "🆔 Fake ID देखें"
+                )
+                AlertDialog.Builder(this)
+                    .setTitle(app.name)
+                    .setItems(options) { _, which ->
+                        when (which) {
+                            0 -> launchVirtual(app)
+                            1 -> addHomeShortcut(app)
+                            2 -> showIdentityDialog(app, identity)
+                        }
+                    }
+                    .setNegativeButton("बंद करें", null)
+                    .show()
+            }
 
-                showIdentityDialog(app, identity)
+            // होम स्क्रीन पर इस ऐप का शॉर्टकट बनाओ (टैप करने पर सीधे वर्चुअल में खुलेगा)
+            private fun addHomeShortcut(app: AppInfo) {
+                if (!ShortcutManagerCompat.isRequestPinShortcutSupported(this)) {
+                    Toast.makeText(this, "यह फ़ोन का लॉन्चर शॉर्टकट नहीं बनाने देता", Toast.LENGTH_LONG).show()
+                    return
+                }
+                val launchIntent = Intent(this, LaunchActivity::class.java)
+                    .setAction(Intent.ACTION_VIEW)
+                    .putExtra(LaunchActivity.EXTRA_PKG, app.packageName)
+
+                val info = ShortcutInfoCompat.Builder(this, "vapp_" + app.packageName)
+                    .setShortLabel(app.name)
+                    .setLongLabel(app.name)
+                    .setIcon(IconCompat.createWithBitmap(drawableToBitmap(app.icon)))
+                    .setIntent(launchIntent)
+                    .build()
+
+                val ok = ShortcutManagerCompat.requestPinShortcut(this, info, null)
+                Toast.makeText(
+                    this,
+                    if (ok) "होम स्क्रीन पर जोड़ने की अनुमति दें" else "शॉर्टकट नहीं बन पाया",
+                    Toast.LENGTH_LONG
+                ).show()
+            }
+
+            private fun drawableToBitmap(d: Drawable): Bitmap {
+                val size = 192
+                val bmp = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888)
+                val canvas = Canvas(bmp)
+                d.setBounds(0, 0, size, size)
+                d.draw(canvas)
+                return bmp
             }
 
             // Tap dialog: सारी fake info दिखाओ + Copy बटन
@@ -263,7 +387,6 @@ jobs:
                         clipboard.setPrimaryClip(ClipData.newPlainText("FakeIdentity", message))
                         Toast.makeText(this, "Copy हो गया", Toast.LENGTH_SHORT).show()
                     }
-                    .setNeutralButton("वर्चुअल में चलाएँ") { _, _ -> launchVirtual(app) }
                     .setNegativeButton("बंद करें", null)
                     .show()
             }
@@ -326,9 +449,9 @@ jobs:
                     .show()
             }
         }
-        VAPP_EOF_3
+        VAPP_EOF_4
         mkdir -p "app/src/main/java/com/example/virtualapp"
-        cat > "app/src/main/java/com/example/virtualapp/MyApplication.kt" <<'VAPP_EOF_4'
+        cat > "app/src/main/java/com/example/virtualapp/MyApplication.kt" <<'VAPP_EOF_5'
         package com.example.virtualapp
 
         import android.app.Application
@@ -382,9 +505,9 @@ jobs:
                 }
             }
         }
-        VAPP_EOF_4
+        VAPP_EOF_5
         mkdir -p "app/src/main/java/com/example/virtualapp/data"
-        cat > "app/src/main/java/com/example/virtualapp/data/FakeIdentity.kt" <<'VAPP_EOF_5'
+        cat > "app/src/main/java/com/example/virtualapp/data/FakeIdentity.kt" <<'VAPP_EOF_6'
         package com.example.virtualapp.data
 
         import android.content.Context
@@ -510,9 +633,9 @@ jobs:
                 return "${(1..223).random()}.${(0..255).random()}.${(0..255).random()}.${(1..254).random()}"
             }
         }
-        VAPP_EOF_5
+        VAPP_EOF_6
         mkdir -p "app/src/main/res/layout"
-        cat > "app/src/main/res/layout/activity_main.xml" <<'VAPP_EOF_6'
+        cat > "app/src/main/res/layout/activity_main.xml" <<'VAPP_EOF_7'
         <?xml version="1.0" encoding="utf-8"?>
         <androidx.coordinatorlayout.widget.CoordinatorLayout
             xmlns:android="http://schemas.android.com/apk/res/android"
@@ -539,9 +662,9 @@ jobs:
                 app:tint="@android:color/white"
                 app:backgroundTint="#1E88E5"/>
         </androidx.coordinatorlayout.widget.CoordinatorLayout>
-        VAPP_EOF_6
+        VAPP_EOF_7
         mkdir -p "app/src/main/res/layout"
-        cat > "app/src/main/res/layout/item_app.xml" <<'VAPP_EOF_7'
+        cat > "app/src/main/res/layout/item_app.xml" <<'VAPP_EOF_8'
         <?xml version="1.0" encoding="utf-8"?>
         <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
             android:layout_width="match_parent"
@@ -588,22 +711,22 @@ jobs:
                     android:layout_marginTop="2dp"/>
             </LinearLayout>
         </LinearLayout>
-        VAPP_EOF_7
+        VAPP_EOF_8
         mkdir -p "app/src/main/res/values"
-        cat > "app/src/main/res/values/strings.xml" <<'VAPP_EOF_8'
+        cat > "app/src/main/res/values/strings.xml" <<'VAPP_EOF_9'
         <resources>
             <string name="app_name">VirtualApp</string>
         </resources>
-        VAPP_EOF_8
+        VAPP_EOF_9
         mkdir -p "app/src/main/res/values"
-        cat > "app/src/main/res/values/themes.xml" <<'VAPP_EOF_9'
+        cat > "app/src/main/res/values/themes.xml" <<'VAPP_EOF_10'
         <resources>
             <style name="Theme.VirtualApp" parent="Theme.Material3.DayNight.NoActionBar">
                 <item name="colorPrimary">#1E88E5</item>
                 <item name="colorOnPrimary">#FFFFFF</item>
             </style>
         </resources>
-        VAPP_EOF_9
+        VAPP_EOF_10
 
     - name: Put our app inside NewBlackbox
       run: |
