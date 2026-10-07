@@ -26,13 +26,13 @@ jobs:
       run: |
         git clone --depth 1 https://github.com/ALEX5402/NewBlackbox.git "$RUNNER_TEMP/bb"
 
-    - name: Inspect BlackBox device-info code
+    - name: Show device-info files
       run: |
-        cd "$RUNNER_TEMP/bb"
-        echo "===== FILES (device info) ====="
-        grep -rIl -i "ANDROID_ID\|getDeviceId\|getImei\|DeviceConfig\|getMacAddress" Bcore/src --include=*.java --include=*.kt | head -40 || true
-        echo "===== LINES ====="
-        grep -rIn -i "ANDROID_ID\|getDeviceId\|getImei\|DeviceConfig" Bcore/src --include=*.java --include=*.kt | head -60 || true
+        cd "$RUNNER_TEMP/bb/Bcore/src/main/java/top/niunaijun/blackbox/fake/service"
+        for f in DeviceIdProxy AndroidIdProxy ITelephonyManagerProxy; do
+          echo "=================== $f.java ==================="
+          grep -v -E '^\s*import |^\s*$' "$f.java" | head -150
+        done
 
     - name: Generate our app files
       run: |
