@@ -1,6 +1,6 @@
 name: Virtual All-in-One APK
 
-# यह अकेली फ़ाइल पूरा ऐप खुद बनाती है (सारा कोड इसी के अंदर है) और APK तैयार करती है।
+# यह अकेली फ़ाइल NewBlackbox डाउनलोड करती है, उसमें आपके ऐप का कोड (नीचे इसी फ़ाइल में) डालती है और APK बनाती है।
 on:
   push:
     branches: [ "main" ]
@@ -22,53 +22,16 @@ jobs:
         yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null || true
         "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "ndk;29.0.13846066" "cmake;3.22.1"
 
-    - name: Generate project files
+    - name: Download NewBlackbox
       run: |
-        mkdir -p "$GITHUB_WORKSPACE/generated"
-        cd "$GITHUB_WORKSPACE/generated"
-        mkdir -p "app"
-        cat > "app/build.gradle" <<'VAPP_EOF_0'
-        plugins {
-            id 'com.android.application'
-            id 'org.jetbrains.kotlin.android'
-        }
+        git clone --depth 1 https://github.com/ALEX5402/NewBlackbox.git "$RUNNER_TEMP/bb"
 
-        android {
-            namespace 'com.example.virtualapp'
-            compileSdk 34
-
-            defaultConfig {
-                applicationId "com.example.virtualapp"
-                minSdk 26
-                targetSdk 34
-                versionCode 1
-                versionName "1.0"
-            }
-
-            buildTypes {
-                release {
-                    minifyEnabled false
-                }
-            }
-            compileOptions {
-                sourceCompatibility JavaVersion.VERSION_21
-                targetCompatibility JavaVersion.VERSION_21
-            }
-            kotlinOptions { jvmTarget = '21' }
-        }
-
-        dependencies {
-            // BlackBox core (AAR GitHub Actions workflow इसे app/libs में डालता है)
-            implementation fileTree(dir: "libs", include: ["*.aar"])
-            implementation 'androidx.core:core-ktx:1.12.0'
-            implementation 'androidx.appcompat:appcompat:1.6.1'
-            implementation 'com.google.android.material:material:1.11.0'
-            implementation 'androidx.recyclerview:recyclerview:1.3.2'
-            implementation 'androidx.constraintlayout:constraintlayout:2.1.4'
-        }
-        VAPP_EOF_0
+    - name: Generate our app files
+      run: |
+        mkdir -p "$RUNNER_TEMP/vapp"
+        cd "$RUNNER_TEMP/vapp"
         mkdir -p "app/src/main"
-        cat > "app/src/main/AndroidManifest.xml" <<'VAPP_EOF_1'
+        cat > "app/src/main/AndroidManifest.xml" <<'VAPP_EOF_0'
         <?xml version="1.0" encoding="utf-8"?>
         <manifest xmlns:android="http://schemas.android.com/apk/res/android"
             xmlns:tools="http://schemas.android.com/tools">
@@ -95,9 +58,9 @@ jobs:
 
             </application>
         </manifest>
-        VAPP_EOF_1
+        VAPP_EOF_0
         mkdir -p "app/src/main/java/com/example/virtualapp"
-        cat > "app/src/main/java/com/example/virtualapp/AppInfo.kt" <<'VAPP_EOF_2'
+        cat > "app/src/main/java/com/example/virtualapp/AppInfo.kt" <<'VAPP_EOF_1'
         package com.example.virtualapp
 
         import android.graphics.drawable.Drawable
@@ -109,9 +72,9 @@ jobs:
             var isAdded: Boolean = false,
             var fakeAndroidId: String? = null
         )
-        VAPP_EOF_2
+        VAPP_EOF_1
         mkdir -p "app/src/main/java/com/example/virtualapp"
-        cat > "app/src/main/java/com/example/virtualapp/AppListAdapter.kt" <<'VAPP_EOF_3'
+        cat > "app/src/main/java/com/example/virtualapp/AppListAdapter.kt" <<'VAPP_EOF_2'
         package com.example.virtualapp
 
         import android.view.LayoutInflater
@@ -162,9 +125,9 @@ jobs:
 
             override fun getItemCount() = apps.size
         }
-        VAPP_EOF_3
+        VAPP_EOF_2
         mkdir -p "app/src/main/java/com/example/virtualapp"
-        cat > "app/src/main/java/com/example/virtualapp/MainActivity.kt" <<'VAPP_EOF_4'
+        cat > "app/src/main/java/com/example/virtualapp/MainActivity.kt" <<'VAPP_EOF_3'
         package com.example.virtualapp
 
         import android.app.AlertDialog
@@ -310,14 +273,35 @@ jobs:
                 Thread {
                     try {
                         val userId = MyApplication.VIRTUAL_USER_ID
-                        BlackBoxCore.get().installPackageAsUser(app.packageName, userId)
-                        BlackBoxCore.get().launchApk(app.packageName, userId)
-                    } catch (e: Throwable) {
+                        val installed = BlackBoxCore.get().installPackageAsUser(app.packageName, userId)
+                        val launched = BlackBoxCore.get().launchApk(app.packageName, userId)
                         runOnUiThread {
-                            Toast.makeText(this, "नहीं खुला: ${e.message}", Toast.LENGTH_LONG).show()
+                            Toast.makeText(
+                                this,
+                                "install=$installed, launch=$launched",
+                                Toast.LENGTH_LONG
+                            ).show()
                         }
+                    } catch (e: Throwable) {
+                        val report = "${e.javaClass.name}: ${e.message}\n\n" +
+                            android.util.Log.getStackTraceString(e).take(1800)
+                        runOnUiThread { showErrorDialog(report) }
                     }
                 }.start()
+            }
+
+            // पूरा एरर दिखाओ + Copy बटन (मुझे भेजने के लिए)
+            private fun showErrorDialog(report: String) {
+                AlertDialog.Builder(this)
+                    .setTitle("वर्चुअल स्पेस एरर")
+                    .setMessage(report)
+                    .setPositiveButton("Copy") { _, _ ->
+                        val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                        clipboard.setPrimaryClip(ClipData.newPlainText("VirtualError", report))
+                        Toast.makeText(this, "Copy हो गया", Toast.LENGTH_SHORT).show()
+                    }
+                    .setNegativeButton("बंद करें", null)
+                    .show()
             }
 
             // Long-press → delete
@@ -341,9 +325,9 @@ jobs:
                     .show()
             }
         }
-        VAPP_EOF_4
+        VAPP_EOF_3
         mkdir -p "app/src/main/java/com/example/virtualapp"
-        cat > "app/src/main/java/com/example/virtualapp/MyApplication.kt" <<'VAPP_EOF_5'
+        cat > "app/src/main/java/com/example/virtualapp/MyApplication.kt" <<'VAPP_EOF_4'
         package com.example.virtualapp
 
         import android.app.Application
@@ -397,9 +381,9 @@ jobs:
                 }
             }
         }
-        VAPP_EOF_5
+        VAPP_EOF_4
         mkdir -p "app/src/main/java/com/example/virtualapp/data"
-        cat > "app/src/main/java/com/example/virtualapp/data/FakeIdentity.kt" <<'VAPP_EOF_6'
+        cat > "app/src/main/java/com/example/virtualapp/data/FakeIdentity.kt" <<'VAPP_EOF_5'
         package com.example.virtualapp.data
 
         import android.content.Context
@@ -525,9 +509,9 @@ jobs:
                 return "${(1..223).random()}.${(0..255).random()}.${(0..255).random()}.${(1..254).random()}"
             }
         }
-        VAPP_EOF_6
+        VAPP_EOF_5
         mkdir -p "app/src/main/res/layout"
-        cat > "app/src/main/res/layout/activity_main.xml" <<'VAPP_EOF_7'
+        cat > "app/src/main/res/layout/activity_main.xml" <<'VAPP_EOF_6'
         <?xml version="1.0" encoding="utf-8"?>
         <androidx.coordinatorlayout.widget.CoordinatorLayout
             xmlns:android="http://schemas.android.com/apk/res/android"
@@ -554,9 +538,9 @@ jobs:
                 app:tint="@android:color/white"
                 app:backgroundTint="#1E88E5"/>
         </androidx.coordinatorlayout.widget.CoordinatorLayout>
-        VAPP_EOF_7
+        VAPP_EOF_6
         mkdir -p "app/src/main/res/layout"
-        cat > "app/src/main/res/layout/item_app.xml" <<'VAPP_EOF_8'
+        cat > "app/src/main/res/layout/item_app.xml" <<'VAPP_EOF_7'
         <?xml version="1.0" encoding="utf-8"?>
         <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
             android:layout_width="match_parent"
@@ -603,75 +587,48 @@ jobs:
                     android:layout_marginTop="2dp"/>
             </LinearLayout>
         </LinearLayout>
-        VAPP_EOF_8
+        VAPP_EOF_7
         mkdir -p "app/src/main/res/values"
-        cat > "app/src/main/res/values/strings.xml" <<'VAPP_EOF_9'
+        cat > "app/src/main/res/values/strings.xml" <<'VAPP_EOF_8'
         <resources>
             <string name="app_name">VirtualApp</string>
         </resources>
-        VAPP_EOF_9
+        VAPP_EOF_8
         mkdir -p "app/src/main/res/values"
-        cat > "app/src/main/res/values/themes.xml" <<'VAPP_EOF_10'
+        cat > "app/src/main/res/values/themes.xml" <<'VAPP_EOF_9'
         <resources>
             <style name="Theme.VirtualApp" parent="Theme.Material3.DayNight.NoActionBar">
                 <item name="colorPrimary">#1E88E5</item>
                 <item name="colorOnPrimary">#FFFFFF</item>
             </style>
         </resources>
-        VAPP_EOF_10
-        cat > "build.gradle" <<'VAPP_EOF_11'
-        plugins {
-            id 'com.android.application' version '8.2.0' apply false
-            id 'org.jetbrains.kotlin.android' version '1.9.20' apply false
-        }
-        VAPP_EOF_11
-        cat > "gradle.properties" <<'VAPP_EOF_12'
-        org.gradle.jvmargs=-Xmx2048m -Dfile.encoding=UTF-8
-        android.useAndroidX=true
-        kotlin.code.style=official
-        android.nonTransitiveRClass=true
-        VAPP_EOF_12
-        cat > "settings.gradle" <<'VAPP_EOF_13'
-        pluginManagement {
-            repositories {
-                google()
-                mavenCentral()
-                gradlePluginPortal()
-            }
-        }
-        dependencyResolutionManagement {
-            repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
-            repositories {
-                google()
-                mavenCentral()
-            }
-        }
+        VAPP_EOF_9
 
-        rootProject.name = "VirtualApp"
-        include ':app'
-        VAPP_EOF_13
-
-    - name: Build BlackBox core AAR
+    - name: Put our app inside NewBlackbox
       run: |
-        git clone --depth 1 https://github.com/ALEX5402/NewBlackbox.git "$RUNNER_TEMP/bb"
         cd "$RUNNER_TEMP/bb"
-        chmod +x gradlew
-        ./gradlew :Bcore:assembleRelease --stacktrace
-        mkdir -p "$GITHUB_WORKSPACE/generated/app/libs"
-        find . -name "*.aar" -path "*Bcore*" -exec cp {} "$GITHUB_WORKSPACE/generated/app/libs/" \;
-        ls -la "$GITHUB_WORKSPACE/generated/app/libs"
-
-    - name: Setup Gradle 8.5
-      uses: gradle/actions/setup-gradle@v3
-      with:
-        gradle-version: '8.5'
+        echo "---- original app/build.gradle ----"
+        cat app/build.gradle
+        rm -rf app/src
+        mkdir -p app/src
+        cp -r "$RUNNER_TEMP/vapp/app/src/main" app/src/main
+        sed -i -E "s/(namespace[[:space:]]*=?[[:space:]]*)[\"'][^\"']+[\"']/\1'com.example.virtualapp'/" app/build.gradle
+        sed -i -E "s/(applicationId[[:space:]]*=?[[:space:]]*)[\"'][^\"']+[\"']/\1'com.example.virtualapp'/" app/build.gradle
+        printf '\ndependencies {\n    implementation "androidx.core:core-ktx:1.12.0"\n    implementation "androidx.appcompat:appcompat:1.6.1"\n    implementation "com.google.android.material:material:1.11.0"\n    implementation "androidx.recyclerview:recyclerview:1.3.2"\n}\n' >> app/build.gradle
+        echo "---- patched app/build.gradle ----"
+        cat app/build.gradle
 
     - name: Build Debug APK
-      working-directory: generated
-      run: gradle assembleDebug --stacktrace --warning-mode all
+      run: |
+        cd "$RUNNER_TEMP/bb"
+        chmod +x gradlew
+        ./gradlew :app:assembleDebug --stacktrace
+        mkdir -p "$GITHUB_WORKSPACE/out"
+        find app/build/outputs/apk/debug -name "*.apk" -exec cp {} "$GITHUB_WORKSPACE/out/app-debug.apk" \;
+        ls -la "$GITHUB_WORKSPACE/out"
 
     - name: Upload APK
       uses: actions/upload-artifact@v4
       with:
         name: app-debug
-        path: generated/app/build/outputs/apk/debug/app-debug.apk
+        path: out/app-debug.apk
