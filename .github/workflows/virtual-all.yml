@@ -43,6 +43,7 @@ jobs:
             <application
                 android:name=".MyApplication"
                 android:allowBackup="true"
+                tools:replace="android:label,android:allowBackup,android:supportsRtl,android:theme"
                 android:label="VirtualApp"
                 android:supportsRtl="true"
                 android:theme="@style/Theme.VirtualApp">
