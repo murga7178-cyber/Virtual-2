@@ -340,6 +340,12 @@ jobs:
 
         class MainActivity : AppCompatActivity() {
 
+            private val GMS_PACKAGES = listOf(
+                "com.google.android.gms",
+                "com.google.android.gsf",
+                "com.android.vending"
+            )
+
             private val apps = mutableListOf<AppInfo>()
             private lateinit var adapter: AppListAdapter
 
@@ -421,7 +427,8 @@ jobs:
                     "▶ वर्चुअल में चलाएँ",
                     "➕ दूसरी कॉपी बनाएँ (नई ID के साथ)",
                     "🏠 होम स्क्रीन पर जोड़ें",
-                    "🆔 Fake ID देखें"
+                    "🆔 Fake ID देखें",
+                    "🧩 Google Play Services जोड़ें (प्रयोग)"
                 )
                 AlertDialog.Builder(this)
                     .setTitle(app.name)
@@ -431,6 +438,7 @@ jobs:
                             1 -> createCopy(app)
                             2 -> pickCopy(app) { copy -> addHomeShortcut(app, copy) }
                             3 -> pickCopy(app) { copy -> showIdentityDialog(app, copy) }
+                            4 -> chooseGmsSpace()
                         }
                     }
                     .setNegativeButton("बंद करें", null)
@@ -444,7 +452,7 @@ jobs:
                     action(0)
                     return
                 }
-                val names = Array(n) { "कॉपी ${it + 1}" }
+                val names = Array(n) { "कॉपी ${it + 1}" + if (IdentityStore.hasGms(this, it)) " · GMS ✔" else "" }
                 AlertDialog.Builder(this)
                     .setTitle(app.name)
                     .setItems(names) { _, which -> action(which) }
@@ -550,6 +558,93 @@ jobs:
                         runOnUiThread { showErrorDialog(report) }
                     }
                 }.start()
+            }
+
+            // किस वर्चुअल नंबर में Google Play Services जोड़नी है, चुनो
+            private fun chooseGmsSpace() {
+                val spaces = (apps.maxOfOrNull { it.copies } ?: 1).coerceAtLeast(1)
+                val names = Array(spaces) { i ->
+                    "वर्चुअल नंबर ${i + 1}" + if (IdentityStore.hasGms(this, i)) "  (GMS जुड़ा ✔)" else ""
+                }
+                AlertDialog.Builder(this)
+                    .setTitle("किस वर्चुअल में Google Play Services जोड़ें?")
+                    .setItems(names) { _, which -> confirmGms(which) }
+                    .setNegativeButton("बंद करें", null)
+                    .show()
+            }
+
+            private fun confirmGms(space: Int) {
+                AlertDialog.Builder(this)
+                    .setTitle("वर्चुअल नंबर ${space + 1}")
+                    .setMessage(
+                        "फ़ोन की Google Play Services, Services Framework और Play Store इस वर्चुअल नंबर में डालने की कोशिश होगी। " +
+                            "यह इस नंबर के सारे ऐप पर लागू होगा।\n\n" +
+                            "यह प्रयोग है, चलेगा या नहीं पक्का नहीं। अपना असली ज़रूरी Google खाता यहाँ न डालें।"
+                    )
+                    .setPositiveButton("जोड़ें") { _, _ -> addGms(space) }
+                    .setNegativeButton("रहने दें", null)
+                    .show()
+            }
+
+            private fun addGms(space: Int) {
+                Toast.makeText(this, "Google Play Services जोड़ रहे हैं...", Toast.LENGTH_SHORT).show()
+                Thread {
+                    val report = StringBuilder()
+                    var okCount = 0
+                    for (pkg in GMS_PACKAGES) {
+                        try {
+                            packageManager.getPackageInfo(pkg, 0)
+                            val r = BlackBoxCore.get().installPackageAsUser(pkg, space)
+                            val (ok, msg) = describeResult(r)
+                            when (ok) {
+                                true -> {
+                                    okCount++
+                                    report.append("✅ $pkg\n")
+                                }
+                                false -> report.append("❌ $pkg: $msg\n")
+                                null -> {
+                                    okCount++
+                                    report.append("❓ $pkg: नतीजा साफ़ नहीं ($msg)\n")
+                                }
+                            }
+                        } catch (e: PackageManager.NameNotFoundException) {
+                            report.append("➖ $pkg: फ़ोन में नहीं मिला\n")
+                        } catch (e: Throwable) {
+                            report.append("❌ $pkg: ${e.javaClass.simpleName}: ${e.message}\n")
+                        }
+                    }
+                    if (okCount > 0) IdentityStore.setGms(this, space, true)
+                    val text = report.toString()
+                    runOnUiThread {
+                        AlertDialog.Builder(this)
+                            .setTitle("वर्चुअल नंबर ${space + 1}: नतीजा")
+                            .setMessage(text)
+                            .setPositiveButton("Copy") { _, _ ->
+                                val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                                clipboard.setPrimaryClip(ClipData.newPlainText("GmsResult", text))
+                                Toast.makeText(this, "Copy हो गया", Toast.LENGTH_SHORT).show()
+                            }
+                            .setNegativeButton("बंद करें", null)
+                            .show()
+                        adapter.notifyDataSetChanged()
+                    }
+                }.start()
+            }
+
+            // InstallResult के अंदर success/msg खोजो (BlackBox का क्लास सीधे नहीं बाँधा)
+            private fun describeResult(r: Any?): Pair<Boolean?, String> {
+                if (r == null) return Pair(null, "")
+                return try {
+                    val ok = r.javaClass.getField("success").getBoolean(r)
+                    val msg = try {
+                        r.javaClass.getField("msg").get(r)?.toString() ?: ""
+                    } catch (e: Throwable) {
+                        ""
+                    }
+                    Pair(ok, msg)
+                } catch (e: Throwable) {
+                    Pair(null, r.toString())
+                }
             }
 
             // पूरा एरर दिखाओ + Copy बटन (मुझे भेजने के लिए)
@@ -766,6 +861,15 @@ jobs:
                 context.getSharedPreferences(PREF, Context.MODE_PRIVATE)
                     .edit().putInt("${packageName}__copies", n + 1).apply()
                 return n
+            }
+
+            // वर्चुअल नंबर में Google Play Services जोड़ी गई या नहीं
+            fun hasGms(context: Context, space: Int): Boolean =
+                context.getSharedPreferences(PREF, Context.MODE_PRIVATE).getBoolean("gms_space_$space", false)
+
+            fun setGms(context: Context, space: Int, value: Boolean) {
+                context.getSharedPreferences(PREF, Context.MODE_PRIVATE)
+                    .edit().putBoolean("gms_space_$space", value).apply()
             }
 
             // ऐप की सारी कॉपियों की ID हटाओ
