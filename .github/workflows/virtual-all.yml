@@ -11,11 +11,11 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-    - name: Set up JDK 17
+    - name: Set up JDK 21
       uses: actions/setup-java@v4
       with:
         distribution: 'temurin'
-        java-version: '17'
+        java-version: '21'
 
     - name: Install NDK for BlackBox
       run: |
@@ -51,10 +51,10 @@ jobs:
                 }
             }
             compileOptions {
-                sourceCompatibility JavaVersion.VERSION_17
-                targetCompatibility JavaVersion.VERSION_17
+                sourceCompatibility JavaVersion.VERSION_21
+                targetCompatibility JavaVersion.VERSION_21
             }
-            kotlinOptions { jvmTarget = '17' }
+            kotlinOptions { jvmTarget = '21' }
         }
 
         dependencies {
@@ -491,187 +491,4 @@ jobs:
             fun delete(context: Context, packageName: String) {
                 val prefs = context.getSharedPreferences(PREF, Context.MODE_PRIVATE)
                 prefs.edit()
-                    .remove("${packageName}_androidId")
-                    .remove("${packageName}_imei")
-                    .remove("${packageName}_wifiMac")
-                    .remove("${packageName}_btMac")
-                    .remove("${packageName}_wifiIp")
-                    .remove("${packageName}_mobileIp")
-                    .remove("${packageName}_serial")
-                    .remove("${packageName}_model")
-                    .remove("${packageName}_brand")
-                    .remove("${packageName}_androidVer")
-                    .remove("${packageName}_fingerprint")
-                    .apply()
-            }
-
-            private fun randomHex(len: Int): String {
-                val chars = "0123456789abcdef"
-                return (1..len).map { chars.random() }.joinToString("")
-            }
-
-            private fun randomDigits(len: Int): String {
-                return (1..len).map { (0..9).random().toString() }.joinToString("")
-            }
-
-            private fun randomMac(): String {
-                val chars = "0123456789ABCDEF"
-                return (1..6).joinToString(":") {
-                    "${chars.random()}${chars.random()}"
-                }
-            }
-
-            private fun randomIp(): String {
-                return "${(1..223).random()}.${(0..255).random()}.${(0..255).random()}.${(1..254).random()}"
-            }
-        }
-        VAPP_EOF_6
-        mkdir -p "app/src/main/res/layout"
-        cat > "app/src/main/res/layout/activity_main.xml" <<'VAPP_EOF_7'
-        <?xml version="1.0" encoding="utf-8"?>
-        <androidx.coordinatorlayout.widget.CoordinatorLayout
-            xmlns:android="http://schemas.android.com/apk/res/android"
-            xmlns:app="http://schemas.android.com/apk/res-auto"
-            android:layout_width="match_parent"
-            android:layout_height="match_parent"
-            android:background="#FFFFFF">
-
-            <androidx.recyclerview.widget.RecyclerView
-                android:id="@+id/appsRecyclerView"
-                android:layout_width="match_parent"
-                android:layout_height="match_parent"
-                android:padding="8dp"
-                android:clipToPadding="false"/>
-
-            <com.google.android.material.floatingactionbutton.FloatingActionButton
-                android:id="@+id/fabAdd"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:layout_gravity="bottom|end"
-                android:layout_margin="20dp"
-                android:contentDescription="ऐप जोड़ें"
-                android:src="@android:drawable/ic_input_add"
-                app:tint="@android:color/white"
-                app:backgroundTint="#1E88E5"/>
-        </androidx.coordinatorlayout.widget.CoordinatorLayout>
-        VAPP_EOF_7
-        mkdir -p "app/src/main/res/layout"
-        cat > "app/src/main/res/layout/item_app.xml" <<'VAPP_EOF_8'
-        <?xml version="1.0" encoding="utf-8"?>
-        <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:orientation="horizontal"
-            android:padding="12dp"
-            android:gravity="center_vertical"
-            android:background="?android:attr/selectableItemBackground">
-
-            <ImageView
-                android:id="@+id/appIcon"
-                android:layout_width="48dp"
-                android:layout_height="48dp"/>
-
-            <LinearLayout
-                android:layout_width="0dp"
-                android:layout_height="wrap_content"
-                android:layout_weight="1"
-                android:orientation="vertical"
-                android:layout_marginStart="12dp">
-
-                <TextView
-                    android:id="@+id/appName"
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:textSize="16sp"
-                    android:textStyle="bold"
-                    android:textColor="#000000"/>
-
-                <TextView
-                    android:id="@+id/appPkg"
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:textSize="12sp"
-                    android:textColor="#666666"/>
-
-                <TextView
-                    android:id="@+id/fakeIdText"
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:textSize="11sp"
-                    android:textColor="#1E88E5"
-                    android:visibility="gone"
-                    android:layout_marginTop="2dp"/>
-            </LinearLayout>
-        </LinearLayout>
-        VAPP_EOF_8
-        mkdir -p "app/src/main/res/values"
-        cat > "app/src/main/res/values/strings.xml" <<'VAPP_EOF_9'
-        <resources>
-            <string name="app_name">VirtualApp</string>
-        </resources>
-        VAPP_EOF_9
-        mkdir -p "app/src/main/res/values"
-        cat > "app/src/main/res/values/themes.xml" <<'VAPP_EOF_10'
-        <resources>
-            <style name="Theme.VirtualApp" parent="Theme.Material3.DayNight.NoActionBar">
-                <item name="colorPrimary">#1E88E5</item>
-                <item name="colorOnPrimary">#FFFFFF</item>
-            </style>
-        </resources>
-        VAPP_EOF_10
-        cat > "build.gradle" <<'VAPP_EOF_11'
-        plugins {
-            id 'com.android.application' version '8.2.0' apply false
-            id 'org.jetbrains.kotlin.android' version '1.9.20' apply false
-        }
-        VAPP_EOF_11
-        cat > "gradle.properties" <<'VAPP_EOF_12'
-        org.gradle.jvmargs=-Xmx2048m -Dfile.encoding=UTF-8
-        android.useAndroidX=true
-        kotlin.code.style=official
-        android.nonTransitiveRClass=true
-        VAPP_EOF_12
-        cat > "settings.gradle" <<'VAPP_EOF_13'
-        pluginManagement {
-            repositories {
-                google()
-                mavenCentral()
-                gradlePluginPortal()
-            }
-        }
-        dependencyResolutionManagement {
-            repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
-            repositories {
-                google()
-                mavenCentral()
-            }
-        }
-
-        rootProject.name = "VirtualApp"
-        include ':app'
-        VAPP_EOF_13
-
-    - name: Build BlackBox core AAR
-      run: |
-        git clone --depth 1 https://github.com/ALEX5402/NewBlackbox.git "$RUNNER_TEMP/bb"
-        cd "$RUNNER_TEMP/bb"
-        chmod +x gradlew
-        ./gradlew :Bcore:assembleRelease --stacktrace
-        mkdir -p "$GITHUB_WORKSPACE/generated/app/libs"
-        find . -name "*.aar" -path "*Bcore*" -exec cp {} "$GITHUB_WORKSPACE/generated/app/libs/" \;
-        ls -la "$GITHUB_WORKSPACE/generated/app/libs"
-
-    - name: Setup Gradle 8.2
-      uses: gradle/actions/setup-gradle@v3
-      with:
-        gradle-version: '8.2'
-
-    - name: Build Debug APK
-      working-directory: generated
-      run: gradle assembleDebug --stacktrace --warning-mode all
-
-    - name: Upload APK
-      uses: actions/upload-artifact@v4
-      with:
-        name: app-debug
-        path: generated/app/build/outputs/apk/debug/app-debug.apk
+           
