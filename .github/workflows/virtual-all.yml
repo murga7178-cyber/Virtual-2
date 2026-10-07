@@ -26,25 +26,20 @@ jobs:
       run: |
         git clone --depth 1 https://github.com/ALEX5402/NewBlackbox.git "$RUNNER_TEMP/bb"
 
-    - name: Show settings provider code
-      run: |
-        cd "$RUNNER_TEMP/bb/Bcore/src/main/java/top/niunaijun/blackbox/fake/service"
-        for f in ISettingsProviderProxy.java context/providers/SystemProviderStub.java context/providers/ContentProviderStub.java; do
-          echo "=================== $f ==================="
-          grep -v -E '^\s*import |^\s*$' "$f" | head -130
-        done
-
     - name: Patch BlackBox to use our fake IDs
       run: |
         cd "$RUNNER_TEMP/bb/Bcore/src/main/java/top/niunaijun/blackbox/fake/service"
         cat > FakeIds.java <<'VAPP_JAVA_EOF'
         package top.niunaijun.blackbox.fake.service;
 
+        import android.os.Bundle;
+
         import java.io.BufferedReader;
         import java.io.File;
         import java.io.FileReader;
 
         import top.niunaijun.blackbox.BlackBoxCore;
+        //BACT_IMPORT
 
         public class FakeIds {
             public static String androidId(String pkg) {
@@ -53,6 +48,28 @@ jobs:
 
             public static String imei(String pkg) {
                 return read(pkg, 2);
+            }
+
+            // Settings provider की call() का जवाब: android_id माँगा गया तो नकली ID डालो
+            public static Object fixSettingsCall(Object[] args, Object result) {
+                try {
+                    if (args == null || !(result instanceof Bundle)) return result;
+                    boolean isAndroidId = false;
+                    for (Object a : args) {
+                        if ("android_id".equals(a)) {
+                            isAndroidId = true;
+                            break;
+                        }
+                    }
+                    if (!isAndroidId) return result;
+                    String fake = androidId(BActivityThread.getAppPackageName());
+                    if (fake == null) return result;
+                    Bundle b = new Bundle((Bundle) result);
+                    b.putString("value", fake);
+                    return b;
+                } catch (Throwable t) {
+                    return result;
+                }
             }
 
             private static String read(String pkg, int col) {
@@ -80,19 +97,42 @@ jobs:
             }
         }
         VAPP_JAVA_EOF
+        IMP=$(grep -h "^import .*\.BActivityThread;" ITelephonyManagerProxy.java | head -1)
+        if [ -z "$IMP" ]; then echo "PATCH FAILED: BActivityThread import not found"; exit 1; fi
+        sed -i "s|//BACT_IMPORT|$IMP|" FakeIds.java
         python3 - <<'VAPP_PY_EOF'
+        import re
+        # 1) IMEI / Device ID / Subscriber ID
         p = 'ITelephonyManagerProxy.java'
         s = open(p, encoding='utf-8').read()
         old = 'return Md5Utils.md5(BlackBoxCore.getHostPkg());'
         n = s.count(old)
         if n < 4:
-            raise SystemExit('PATCH FAILED: expected at least 4 matches, found %d' % n)
+            raise SystemExit('PATCH FAILED: telephony expected at least 4 matches, found %d' % n)
         new = 'String vappId = FakeIds.imei(BActivityThread.getAppPackageName()); return vappId != null ? vappId : Md5Utils.md5(BlackBoxCore.getHostPkg());'
-        s = s.replace(old, new)
-        open(p, 'w', encoding='utf-8').write(s)
-        print('patched', n, 'places')
+        open(p, 'w', encoding='utf-8').write(s.replace(old, new))
+        print('telephony patched', n, 'places')
+        # 2) Android ID (Settings provider call)
+        pat = re.compile(r'public\s+Object\s+invoke\s*\(\s*Object\s+proxy\s*,\s*Method\s+method\s*,\s*Object\[\]\s+args\s*\)\s+throws\s+Throwable\s*\{')
+        repl = ('public Object invoke(Object proxy, Method method, Object[] args) throws Throwable {\n'
+                '        Object vappResult = vappInvokeOrig(proxy, method, args);\n'
+                '        if (method != null && "call".equals(method.getName())) {\n'
+                '            return FakeIds.fixSettingsCall(args, vappResult);\n'
+                '        }\n'
+                '        return vappResult;\n'
+                '    }\n\n'
+                '    private Object vappInvokeOrig(Object proxy, Method method, Object[] args) throws Throwable {')
+        for f in ['context/providers/SystemProviderStub.java', 'context/providers/ContentProviderStub.java']:
+            s = open(f, encoding='utf-8').read()
+            s2, c = pat.subn(lambda m: repl, s)
+            if c != 1:
+                raise SystemExit('PATCH FAILED: invoke() in %s found %d times' % (f, c))
+            s2 = s2.replace('package top.niunaijun.blackbox.fake.service.context.providers;',
+                            'package top.niunaijun.blackbox.fake.service.context.providers;\n\nimport top.niunaijun.blackbox.fake.service.FakeIds;', 1)
+            open(f, 'w', encoding='utf-8').write(s2)
+            print('android id patched', f)
         VAPP_PY_EOF
-        grep -n "vappId" ITelephonyManagerProxy.java | head
+        grep -n "vappInvokeOrig\|import .*FakeIds" context/providers/SystemProviderStub.java context/providers/ContentProviderStub.java | head
 
     - name: Generate our app files
       run: |
@@ -187,7 +227,7 @@ jobs:
 
                 holder.fakeId.visibility = View.VISIBLE
                 holder.fakeId.text = if (app.isAdded) {
-                    "✅ IMEI/डिवाइस ID: नकली लागू (वर्चुअल में चलाने पर)\n⚠️ Android ID: अभी लागू नहीं, असली दिख सकती है"
+                    "✅ Android ID और IMEI/डिवाइस ID: नकली लागू (वर्चुअल में चलाने पर)\n⚠️ MAC, IP, Model आदि: असली दिख सकते हैं"
                 } else {
                     "⚠️ अभी नकली ID नहीं, असली पहचान दिख सकती है"
                 }
@@ -423,10 +463,10 @@ jobs:
                     📱 ${app.name}
 
                     ✅ वर्चुअल में चलाने पर लागू होती हैं:
+                    🆔 Android ID: ${id.androidId}
                     📞 IMEI / Device ID / Subscriber ID: ${id.imei}
 
                     ⚠️ अभी लागू नहीं (सिर्फ़ बनी हुई):
-                    🆔 Android ID: ${id.androidId}
                     📶 WiFi MAC: ${id.wifiMac}
                     🔵 Bluetooth MAC: ${id.bluetoothMac}
                     🌐 WiFi IP: ${id.wifiIp}
