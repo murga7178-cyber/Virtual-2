@@ -49,8 +49,30 @@ jobs:
                 return pkg + "@" + BActivityThread.getUserId();
             }
 
-            public static String currentImei() {
+            public static String currentImei(String methodName) {
+                log("PHONE", methodName);
                 return read(currentKey(), 2);
+            }
+
+            private static final java.util.Set<String> LOGGED =
+                    java.util.Collections.synchronizedSet(new java.util.HashSet<String>());
+
+            // कौन-सा ऐप कौन-सी जानकारी माँग रहा है, इसका रिकॉर्ड (हर प्रोसेस में एक बार)
+            public static void log(String kind, String name) {
+                try {
+                    String key = currentKey();
+                    if (key == null) return;
+                    String clean = (name == null ? "" : name).replace("|", "/").replace("\n", " ");
+                    if (clean.length() > 80) clean = clean.substring(0, 80);
+                    if (!LOGGED.add(key + "|" + kind + "|" + clean)) return;
+                    String host = BlackBoxCore.getHostPkg();
+                    File f = new File("/data/data/" + host + "/files/id_access.log");
+                    if (f.exists() && f.length() > 200000) return;
+                    try (java.io.FileWriter w = new java.io.FileWriter(f, true)) {
+                        w.write(System.currentTimeMillis() + "|" + key + "|" + kind + "|" + clean + "\n");
+                    }
+                } catch (Throwable ignored) {
+                }
             }
 
             public static String currentAndroidId() {
@@ -60,6 +82,15 @@ jobs:
             // Settings provider की call() का जवाब: android_id माँगा गया तो नकली ID डालो
             public static Object fixSettingsCall(Object[] args, Object result) {
                 try {
+                    if (args != null) {
+                        for (int i = 0; i < args.length - 1; i++) {
+                            if (args[i] instanceof String && ((String) args[i]).startsWith("GET_")
+                                    && args[i + 1] instanceof String) {
+                                log("SETTING", ((String) args[i]).substring(4) + "/" + args[i + 1]);
+                                break;
+                            }
+                        }
+                    }
                     if (args == null || !(result instanceof Bundle)) return result;
                     boolean isAndroidId = false;
                     for (Object a : args) {
@@ -116,7 +147,7 @@ jobs:
         n = s.count(old)
         if n < 4:
             raise SystemExit('PATCH FAILED: telephony expected at least 4 matches, found %d' % n)
-        new = 'String vappId = FakeIds.currentImei(); return vappId != null ? vappId : Md5Utils.md5(BlackBoxCore.getHostPkg());'
+        new = 'String vappId = FakeIds.currentImei(method.getName()); return vappId != null ? vappId : Md5Utils.md5(BlackBoxCore.getHostPkg());'
         open(p, 'w', encoding='utf-8').write(s.replace(old, new))
         print('telephony patched', n, 'places')
         # 2) Android ID (Settings provider call)
@@ -198,7 +229,169 @@ jobs:
         )
         VAPP_EOF_1
         mkdir -p "app/src/main/java/com/example/virtualapp"
-        cat > "app/src/main/java/com/example/virtualapp/AppListAdapter.kt" <<'VAPP_EOF_2'
+        cat > "app/src/main/java/com/example/virtualapp/AppInspector.kt" <<'VAPP_EOF_2'
+        package com.example.virtualapp
+
+        import android.content.Context
+        import android.content.pm.PackageInfo
+        import android.content.pm.PackageManager
+        import java.io.File
+        import java.text.SimpleDateFormat
+        import java.util.Date
+        import java.util.Locale
+
+        // किसी ऐप की पहचान से जुड़ी जानकारी: (1) ऐप की अपनी घोषणाएँ, (2) वर्चुअल में चलाने पर उसने क्या माँगा
+        object AppInspector {
+
+            const val LOG_NAME = "id_access.log"
+
+            private val PERMISSION_INFO = linkedMapOf(
+                "com.google.android.gms.permission.AD_ID" to "📢 विज्ञापन ID (Advertising ID) पढ़ सकता है",
+                "android.permission.READ_PHONE_STATE" to "📞 फ़ोन की पहचान (सिम/IMEI जैसी) पढ़ने की माँग",
+                "android.permission.READ_PRIVILEGED_PHONE_STATE" to "📞 खास फ़ोन पहचान (आम ऐप को नहीं मिलती)",
+                "android.permission.READ_PHONE_NUMBERS" to "📱 आपका फ़ोन नंबर पढ़ सकता है",
+                "android.permission.GET_ACCOUNTS" to "👤 फ़ोन के खाते (ईमेल) देख सकता है",
+                "android.permission.ACCESS_WIFI_STATE" to "📶 WiFi की जानकारी पढ़ सकता है",
+                "android.permission.BLUETOOTH" to "🔵 Bluetooth की जानकारी पढ़ सकता है",
+                "android.permission.BLUETOOTH_CONNECT" to "🔵 पास के Bluetooth उपकरण देख सकता है",
+                "android.permission.ACCESS_FINE_LOCATION" to "📍 सटीक लोकेशन",
+                "android.permission.ACCESS_COARSE_LOCATION" to "📍 मोटा लोकेशन",
+                "android.permission.QUERY_ALL_PACKAGES" to "🗂️ फ़ोन के सारे इंस्टॉल ऐप की सूची देख सकता है",
+                "com.google.android.finsky.permission.BIND_GET_INSTALL_REFERRER_SERVICE" to "🔗 इंस्टॉल रेफ़रर (किस लिंक से इंस्टॉल हुआ) पढ़ सकता है",
+                "android.permission.READ_CONTACTS" to "📇 संपर्क पढ़ सकता है",
+                "android.permission.READ_SMS" to "💬 SMS पढ़ सकता है",
+                "android.permission.READ_CALL_LOG" to "☎️ कॉल लॉग पढ़ सकता है",
+                "android.permission.CAMERA" to "📷 कैमरा",
+                "android.permission.RECORD_AUDIO" to "🎤 माइक्रोफ़ोन"
+            )
+
+            private val TRACKERS = listOf(
+                "com.google.android.gms.ads" to "Google Ads (AdMob)",
+                "com.google.firebase.analytics" to "Firebase Analytics",
+                "com.google.android.gms.measurement" to "Google Analytics",
+                "com.google.firebase.crashlytics" to "Crashlytics",
+                "com.facebook" to "Facebook SDK",
+                "com.appsflyer" to "AppsFlyer",
+                "com.adjust.sdk" to "Adjust",
+                "io.branch" to "Branch",
+                "com.onesignal" to "OneSignal",
+                "com.unity3d.ads" to "Unity Ads",
+                "com.applovin" to "AppLovin",
+                "com.ironsource" to "ironSource",
+                "com.vungle" to "Vungle",
+                "com.chartboost" to "Chartboost",
+                "com.mbridge" to "Mintegral",
+                "com.bytedance" to "TikTok / Pangle",
+                "com.inmobi" to "InMobi",
+                "com.startapp" to "StartApp",
+                "com.moengage" to "MoEngage",
+                "com.clevertap" to "CleverTap",
+                "com.mixpanel" to "Mixpanel",
+                "com.amplitude" to "Amplitude",
+                "com.flurry" to "Flurry",
+                "com.singular" to "Singular",
+                "com.kochava" to "Kochava"
+            )
+
+            private fun loadInfo(pm: PackageManager, pkg: String): PackageInfo? {
+                val full = PackageManager.GET_PERMISSIONS or PackageManager.GET_ACTIVITIES or
+                    PackageManager.GET_SERVICES or PackageManager.GET_RECEIVERS or PackageManager.GET_PROVIDERS
+                return try {
+                    pm.getPackageInfo(pkg, full)
+                } catch (e: Throwable) {
+                    try {
+                        pm.getPackageInfo(pkg, PackageManager.GET_PERMISSIONS)
+                    } catch (e2: Throwable) {
+                        null
+                    }
+                }
+            }
+
+            fun staticReport(context: Context, pkg: String): String {
+                val info = loadInfo(context.packageManager, pkg)
+                    ?: return "ऐप की जानकारी पढ़ी नहीं जा सकी।"
+
+                val perms = info.requestedPermissions?.toSet() ?: emptySet()
+                val found = PERMISSION_INFO.filterKeys { it in perms }
+
+                val names = ArrayList<String>()
+                info.activities?.forEach { names.add(it.name) }
+                info.services?.forEach { names.add(it.name) }
+                info.receivers?.forEach { names.add(it.name) }
+                info.providers?.forEach { names.add(it.name) }
+                val trackers = TRACKERS.filter { (prefix, _) -> names.any { it.startsWith(prefix) } }
+                    .map { it.second }.distinct()
+
+                val sb = StringBuilder()
+                sb.append("📋 ऐप की अपनी घोषणा (चलाए बिना भी दिखती है)\n\n")
+
+                sb.append("🔐 पहचान/जानकारी से जुड़ी अनुमतियाँ:\n")
+                if (found.isEmpty()) sb.append("• कोई खास नहीं मिली\n")
+                for ((_, text) in found) sb.append("• ").append(text).append('\n')
+
+                sb.append("\n📡 ट्रैकिंग / विज्ञापन SDK:\n")
+                if (trackers.isEmpty()) sb.append("• कोई जाना-पहचाना नहीं मिला\n")
+                for (t in trackers) sb.append("• ").append(t).append('\n')
+
+                sb.append("\n🎯 ऐप आपको कैसे पहचान सकता है:\n")
+                sb.append("• Android ID: कोई भी ऐप बिना अनुमति के पढ़ सकता है\n")
+                if ("com.google.android.gms.permission.AD_ID" in perms || trackers.isNotEmpty()) {
+                    sb.append("• विज्ञापन ID: इस ऐप में है, यह पहचान का सबसे आम तरीका है\n")
+                } else {
+                    sb.append("• विज्ञापन ID: इसकी अनुमति घोषित नहीं दिखी\n")
+                }
+                sb.append("• IMEI / असली MAC: Android 10 और ऊपर में आम ऐप ये नहीं पढ़ पाते\n")
+                return sb.toString()
+            }
+
+            fun dynamicReport(context: Context, pkg: String): String {
+                val sb = StringBuilder()
+                sb.append("▶ वर्चुअल में चलाने पर इसने क्या माँगा\n\n")
+                val f = File(context.filesDir, LOG_NAME)
+                if (!f.exists()) {
+                    sb.append("• अभी कोई रिकॉर्ड नहीं। ऐप को वर्चुअल में चलाकर कुछ देर इस्तेमाल करें, फिर दोबारा देखें।\n")
+                    return sb.toString()
+                }
+                val counts = LinkedHashMap<String, Int>()
+                val last = HashMap<String, Long>()
+                try {
+                    f.forEachLine { line ->
+                        val p = line.split("|")
+                        if (p.size >= 4 && p[1].startsWith("$pkg@")) {
+                            val k = p[2] + "|" + p[3]
+                            counts[k] = (counts[k] ?: 0) + 1
+                            last[k] = p[0].toLongOrNull() ?: 0L
+                        }
+                    }
+                } catch (e: Throwable) {
+                    sb.append("• लॉग पढ़ा नहीं जा सका\n")
+                    return sb.toString()
+                }
+                if (counts.isEmpty()) {
+                    sb.append("• इस ऐप का अभी कोई रिकॉर्ड नहीं।\n")
+                    return sb.toString()
+                }
+                val fmt = SimpleDateFormat("dd MMM, HH:mm", Locale.getDefault())
+                for ((k, n) in counts) {
+                    val kind = k.substringBefore('|')
+                    val name = k.substringAfter('|')
+                    val label = if (kind == "PHONE") "📞 फ़ोन ID माँगी" else "⚙️ सेटिंग पढ़ी"
+                    sb.append("• $label: $name ($n बार चलाने में, आख़िरी ${fmt.format(Date(last[k] ?: 0L))})\n")
+                }
+                sb.append("\nनोट: यह सिर्फ़ वही दिखाता है जो BlackBox पकड़ पाता है। विज्ञापन ID Google Play Services से आती है, वह यहाँ नहीं दिखेगी।\n")
+                return sb.toString()
+            }
+
+            fun clearLog(context: Context) {
+                try {
+                    File(context.filesDir, LOG_NAME).delete()
+                } catch (e: Throwable) {
+                }
+            }
+        }
+        VAPP_EOF_2
+        mkdir -p "app/src/main/java/com/example/virtualapp"
+        cat > "app/src/main/java/com/example/virtualapp/AppListAdapter.kt" <<'VAPP_EOF_3'
         package com.example.virtualapp
 
         import android.view.LayoutInflater
@@ -250,9 +443,9 @@ jobs:
 
             override fun getItemCount() = apps.size
         }
-        VAPP_EOF_2
+        VAPP_EOF_3
         mkdir -p "app/src/main/java/com/example/virtualapp"
-        cat > "app/src/main/java/com/example/virtualapp/LaunchActivity.kt" <<'VAPP_EOF_3'
+        cat > "app/src/main/java/com/example/virtualapp/LaunchActivity.kt" <<'VAPP_EOF_4'
         package com.example.virtualapp
 
         import android.app.Activity
@@ -310,9 +503,9 @@ jobs:
                 const val EXTRA_USER = "user"
             }
         }
-        VAPP_EOF_3
+        VAPP_EOF_4
         mkdir -p "app/src/main/java/com/example/virtualapp"
-        cat > "app/src/main/java/com/example/virtualapp/MainActivity.kt" <<'VAPP_EOF_4'
+        cat > "app/src/main/java/com/example/virtualapp/MainActivity.kt" <<'VAPP_EOF_5'
         package com.example.virtualapp
 
         import android.app.AlertDialog
@@ -428,6 +621,7 @@ jobs:
                     "➕ दूसरी कॉपी बनाएँ (नई ID के साथ)",
                     "🏠 होम स्क्रीन पर जोड़ें",
                     "🆔 Fake ID देखें",
+                    "🔍 यह ऐप क्या-क्या पढ़ता है",
                     "🧩 Google Play Services जोड़ें (प्रयोग)"
                 )
                 AlertDialog.Builder(this)
@@ -438,7 +632,8 @@ jobs:
                             1 -> createCopy(app)
                             2 -> pickCopy(app) { copy -> addHomeShortcut(app, copy) }
                             3 -> pickCopy(app) { copy -> showIdentityDialog(app, copy) }
-                            4 -> chooseGmsSpace()
+                            4 -> showInspect(app)
+                            5 -> chooseGmsSpace()
                         }
                     }
                     .setNegativeButton("बंद करें", null)
@@ -558,6 +753,26 @@ jobs:
                         runOnUiThread { showErrorDialog(report) }
                     }
                 }.start()
+            }
+
+            // ऐप कैसे पहचानता है: अनुमतियाँ, ट्रैकर SDK और वर्चुअल में माँगी गई जानकारी
+            private fun showInspect(app: AppInfo) {
+                val text = AppInspector.staticReport(this, app.packageName) + "\n" +
+                    AppInspector.dynamicReport(this, app.packageName)
+                AlertDialog.Builder(this)
+                    .setTitle("🔍 ${app.name}")
+                    .setMessage(text)
+                    .setPositiveButton("Copy") { _, _ ->
+                        val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                        clipboard.setPrimaryClip(ClipData.newPlainText("AppInspect", text))
+                        Toast.makeText(this, "Copy हो गया", Toast.LENGTH_SHORT).show()
+                    }
+                    .setNeutralButton("रिकॉर्ड साफ़ करें") { _, _ ->
+                        AppInspector.clearLog(this)
+                        Toast.makeText(this, "रिकॉर्ड साफ़ हो गया", Toast.LENGTH_SHORT).show()
+                    }
+                    .setNegativeButton("बंद करें", null)
+                    .show()
             }
 
             // किस वर्चुअल नंबर में Google Play Services जोड़नी है, चुनो
@@ -683,9 +898,9 @@ jobs:
                     .show()
             }
         }
-        VAPP_EOF_4
+        VAPP_EOF_5
         mkdir -p "app/src/main/java/com/example/virtualapp"
-        cat > "app/src/main/java/com/example/virtualapp/MyApplication.kt" <<'VAPP_EOF_5'
+        cat > "app/src/main/java/com/example/virtualapp/MyApplication.kt" <<'VAPP_EOF_6'
         package com.example.virtualapp
 
         import android.app.Application
@@ -739,9 +954,9 @@ jobs:
                 }
             }
         }
-        VAPP_EOF_5
+        VAPP_EOF_6
         mkdir -p "app/src/main/java/com/example/virtualapp/data"
-        cat > "app/src/main/java/com/example/virtualapp/data/FakeIdentity.kt" <<'VAPP_EOF_6'
+        cat > "app/src/main/java/com/example/virtualapp/data/FakeIdentity.kt" <<'VAPP_EOF_7'
         package com.example.virtualapp.data
 
         import android.content.Context
@@ -948,9 +1163,9 @@ jobs:
                 return "${(1..223).random()}.${(0..255).random()}.${(0..255).random()}.${(1..254).random()}"
             }
         }
-        VAPP_EOF_6
+        VAPP_EOF_7
         mkdir -p "app/src/main/res/layout"
-        cat > "app/src/main/res/layout/activity_main.xml" <<'VAPP_EOF_7'
+        cat > "app/src/main/res/layout/activity_main.xml" <<'VAPP_EOF_8'
         <?xml version="1.0" encoding="utf-8"?>
         <androidx.coordinatorlayout.widget.CoordinatorLayout
             xmlns:android="http://schemas.android.com/apk/res/android"
@@ -977,9 +1192,9 @@ jobs:
                 app:tint="@android:color/white"
                 app:backgroundTint="#1E88E5"/>
         </androidx.coordinatorlayout.widget.CoordinatorLayout>
-        VAPP_EOF_7
+        VAPP_EOF_8
         mkdir -p "app/src/main/res/layout"
-        cat > "app/src/main/res/layout/item_app.xml" <<'VAPP_EOF_8'
+        cat > "app/src/main/res/layout/item_app.xml" <<'VAPP_EOF_9'
         <?xml version="1.0" encoding="utf-8"?>
         <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
             android:layout_width="match_parent"
@@ -1026,22 +1241,22 @@ jobs:
                     android:layout_marginTop="2dp"/>
             </LinearLayout>
         </LinearLayout>
-        VAPP_EOF_8
+        VAPP_EOF_9
         mkdir -p "app/src/main/res/values"
-        cat > "app/src/main/res/values/strings.xml" <<'VAPP_EOF_9'
+        cat > "app/src/main/res/values/strings.xml" <<'VAPP_EOF_10'
         <resources>
             <string name="app_name">VirtualApp</string>
         </resources>
-        VAPP_EOF_9
+        VAPP_EOF_10
         mkdir -p "app/src/main/res/values"
-        cat > "app/src/main/res/values/themes.xml" <<'VAPP_EOF_10'
+        cat > "app/src/main/res/values/themes.xml" <<'VAPP_EOF_11'
         <resources>
             <style name="Theme.VirtualApp" parent="Theme.Material3.DayNight.NoActionBar">
                 <item name="colorPrimary">#1E88E5</item>
                 <item name="colorOnPrimary">#FFFFFF</item>
             </style>
         </resources>
-        VAPP_EOF_10
+        VAPP_EOF_11
 
     - name: Put our app inside NewBlackbox
       run: |
