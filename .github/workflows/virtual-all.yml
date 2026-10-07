@@ -42,12 +42,19 @@ jobs:
         //BACT_IMPORT
 
         public class FakeIds {
-            public static String androidId(String pkg) {
-                return read(pkg, 1);
+            // अभी चल रहे वर्चुअल ऐप की कुंजी: पैकेज@कॉपी नंबर
+            private static String currentKey() {
+                String pkg = BActivityThread.getAppPackageName();
+                if (pkg == null) return null;
+                return pkg + "@" + BActivityThread.getUserId();
             }
 
-            public static String imei(String pkg) {
-                return read(pkg, 2);
+            public static String currentImei() {
+                return read(currentKey(), 2);
+            }
+
+            public static String currentAndroidId() {
+                return read(currentKey(), 1);
             }
 
             // Settings provider की call() का जवाब: android_id माँगा गया तो नकली ID डालो
@@ -62,7 +69,7 @@ jobs:
                         }
                     }
                     if (!isAndroidId) return result;
-                    String fake = androidId(BActivityThread.getAppPackageName());
+                    String fake = currentAndroidId();
                     if (fake == null) return result;
                     Bundle b = new Bundle((Bundle) result);
                     b.putString("value", fake);
@@ -72,8 +79,8 @@ jobs:
                 }
             }
 
-            private static String read(String pkg, int col) {
-                if (pkg == null) return null;
+            private static String read(String key, int col) {
+                if (key == null) return null;
                 String host = BlackBoxCore.getHostPkg();
                 String[] paths = {
                         "/data/data/" + host + "/files/fake_ids.txt",
@@ -87,7 +94,7 @@ jobs:
                             String line;
                             while ((line = r.readLine()) != null) {
                                 String[] p = line.split("\\|");
-                                if (p.length >= 3 && p[0].equals(pkg)) return p[col];
+                                if (p.length >= 3 && p[0].equals(key)) return p[col];
                             }
                         }
                     } catch (Throwable ignored) {
@@ -109,7 +116,7 @@ jobs:
         n = s.count(old)
         if n < 4:
             raise SystemExit('PATCH FAILED: telephony expected at least 4 matches, found %d' % n)
-        new = 'String vappId = FakeIds.imei(BActivityThread.getAppPackageName()); return vappId != null ? vappId : Md5Utils.md5(BlackBoxCore.getHostPkg());'
+        new = 'String vappId = FakeIds.currentImei(); return vappId != null ? vappId : Md5Utils.md5(BlackBoxCore.getHostPkg());'
         open(p, 'w', encoding='utf-8').write(s.replace(old, new))
         print('telephony patched', n, 'places')
         # 2) Android ID (Settings provider call)
@@ -186,7 +193,8 @@ jobs:
             val packageName: String,
             val icon: Drawable,
             var isAdded: Boolean = false,
-            var fakeAndroidId: String? = null
+            var fakeAndroidId: String? = null,
+            var copies: Int = 1
         )
         VAPP_EOF_1
         mkdir -p "app/src/main/java/com/example/virtualapp"
@@ -227,7 +235,8 @@ jobs:
 
                 holder.fakeId.visibility = View.VISIBLE
                 holder.fakeId.text = if (app.isAdded) {
-                    "✅ Android ID और IMEI/डिवाइस ID: नकली लागू (वर्चुअल में चलाने पर)\n⚠️ MAC, IP, Model आदि: असली दिख सकते हैं"
+                    val copiesLine = if (app.copies > 1) "📋 कुल कॉपी: ${app.copies}\n" else ""
+                    copiesLine + "✅ Android ID और IMEI/डिवाइस ID: नकली लागू (वर्चुअल में चलाने पर)\n⚠️ MAC, IP, Model आदि: असली दिख सकते हैं"
                 } else {
                     "⚠️ अभी नकली ID नहीं, असली पहचान दिख सकती है"
                 }
@@ -262,12 +271,12 @@ jobs:
                     finish()
                     return
                 }
+                val userId = intent.getIntExtra(EXTRA_USER, 0)
                 val appCtx = applicationContext
-                IdentityStore.getOrCreate(appCtx, pkg)
+                IdentityStore.getOrCreate(appCtx, IdentityStore.key(pkg, userId))
                 IdentityStore.syncBridge(appCtx)
                 Thread {
                     try {
-                        val userId = MyApplication.VIRTUAL_USER_ID
                         // पहले सीधे खोलने की कोशिश (वर्चुअल कॉपी पहले से हो तो असली ऐप ज़रूरी नहीं)
                         var ok = try {
                             BlackBoxCore.get().launchApk(pkg, userId)
@@ -298,6 +307,7 @@ jobs:
 
             companion object {
                 const val EXTRA_PKG = "pkg"
+                const val EXTRA_USER = "user"
             }
         }
         VAPP_EOF_3
@@ -393,7 +403,8 @@ jobs:
                         packageName = ai.packageName,
                         icon = ai.loadIcon(pm),
                         isAdded = existing != null,
-                        fakeAndroidId = existing?.androidId
+                        fakeAndroidId = existing?.androidId,
+                        copies = IdentityStore.copyCount(this, ai.packageName)
                     )
                 )
             }
@@ -403,10 +414,12 @@ jobs:
                 val identity = IdentityStore.getOrCreate(this, app.packageName)
                 app.isAdded = true
                 app.fakeAndroidId = identity.androidId
+                app.copies = IdentityStore.copyCount(this, app.packageName)
                 adapter.notifyDataSetChanged()
 
                 val options = arrayOf(
                     "▶ वर्चुअल में चलाएँ",
+                    "➕ दूसरी कॉपी बनाएँ (नई ID के साथ)",
                     "🏠 होम स्क्रीन पर जोड़ें",
                     "🆔 Fake ID देखें"
                 )
@@ -414,17 +427,42 @@ jobs:
                     .setTitle(app.name)
                     .setItems(options) { _, which ->
                         when (which) {
-                            0 -> launchVirtual(app)
-                            1 -> addHomeShortcut(app)
-                            2 -> showIdentityDialog(app, identity)
+                            0 -> pickCopy(app) { copy -> launchVirtual(app, copy) }
+                            1 -> createCopy(app)
+                            2 -> pickCopy(app) { copy -> addHomeShortcut(app, copy) }
+                            3 -> pickCopy(app) { copy -> showIdentityDialog(app, copy) }
                         }
                     }
                     .setNegativeButton("बंद करें", null)
                     .show()
             }
 
-            // होम स्क्रीन पर इस ऐप का शॉर्टकट बनाओ (टैप करने पर सीधे वर्चुअल में खुलेगा)
-            private fun addHomeShortcut(app: AppInfo) {
+            // एक से ज़्यादा कॉपी हों तो पूछो कौन-सी
+            private fun pickCopy(app: AppInfo, action: (Int) -> Unit) {
+                val n = IdentityStore.copyCount(this, app.packageName)
+                if (n <= 1) {
+                    action(0)
+                    return
+                }
+                val names = Array(n) { "कॉपी ${it + 1}" }
+                AlertDialog.Builder(this)
+                    .setTitle(app.name)
+                    .setItems(names) { _, which -> action(which) }
+                    .setNegativeButton("बंद करें", null)
+                    .show()
+            }
+
+            // इसी ऐप की एक और कॉपी: नया वर्चुअल स्पेस + नई ID
+            private fun createCopy(app: AppInfo) {
+                val copy = IdentityStore.addCopy(this, app.packageName)
+                app.copies = copy + 1
+                adapter.notifyDataSetChanged()
+                Toast.makeText(this, "कॉपी ${copy + 1} बनी, नई ID के साथ", Toast.LENGTH_SHORT).show()
+                launchVirtual(app, copy)
+            }
+
+            // होम स्क्रीन पर इस कॉपी का शॉर्टकट बनाओ (टैप करने पर सीधे वर्चुअल में खुलेगा)
+            private fun addHomeShortcut(app: AppInfo, copy: Int) {
                 if (!ShortcutManagerCompat.isRequestPinShortcutSupported(this)) {
                     Toast.makeText(this, "यह फ़ोन का लॉन्चर शॉर्टकट नहीं बनाने देता", Toast.LENGTH_LONG).show()
                     return
@@ -432,10 +470,12 @@ jobs:
                 val launchIntent = Intent(this, LaunchActivity::class.java)
                     .setAction(Intent.ACTION_VIEW)
                     .putExtra(LaunchActivity.EXTRA_PKG, app.packageName)
+                    .putExtra(LaunchActivity.EXTRA_USER, copy)
 
-                val info = ShortcutInfoCompat.Builder(this, "vapp_" + app.packageName)
-                    .setShortLabel(app.name)
-                    .setLongLabel(app.name)
+                val label = if (copy == 0) app.name else "${app.name} ${copy + 1}"
+                val info = ShortcutInfoCompat.Builder(this, "vapp_" + IdentityStore.key(app.packageName, copy))
+                    .setShortLabel(label)
+                    .setLongLabel(label)
                     .setIcon(IconCompat.createWithBitmap(drawableToBitmap(app.icon)))
                     .setIntent(launchIntent)
                     .build()
@@ -458,9 +498,10 @@ jobs:
             }
 
             // Tap dialog: सारी fake info दिखाओ + Copy बटन
-            private fun showIdentityDialog(app: AppInfo, id: FakeIdentity) {
+            private fun showIdentityDialog(app: AppInfo, copy: Int) {
+                val id = IdentityStore.getOrCreate(this, IdentityStore.key(app.packageName, copy))
                 val message = """
-                    📱 ${app.name}
+                    📱 ${app.name} (कॉपी ${copy + 1})
 
                     ✅ वर्चुअल में चलाने पर लागू होती हैं:
                     🆔 Android ID: ${id.androidId}
@@ -489,18 +530,17 @@ jobs:
                     .show()
             }
 
-            // BlackBox के वर्चुअल स्पेस में ऐप इंस्टॉल करके चलाओ
-            private fun launchVirtual(app: AppInfo) {
+            // BlackBox के वर्चुअल स्पेस (कॉपी नंबर = यूज़र नंबर) में ऐप इंस्टॉल करके चलाओ
+            private fun launchVirtual(app: AppInfo, copy: Int) {
                 Toast.makeText(this, "वर्चुअल स्पेस में खोल रहे हैं...", Toast.LENGTH_SHORT).show()
                 Thread {
                     try {
-                        val userId = MyApplication.VIRTUAL_USER_ID
-                        val installed = BlackBoxCore.get().installPackageAsUser(app.packageName, userId)
-                        val launched = BlackBoxCore.get().launchApk(app.packageName, userId)
+                        val installed = BlackBoxCore.get().installPackageAsUser(app.packageName, copy)
+                        val launched = BlackBoxCore.get().launchApk(app.packageName, copy)
                         runOnUiThread {
                             Toast.makeText(
                                 this,
-                                "install=$installed, launch=$launched",
+                                "कॉपी ${copy + 1}: install=$installed, launch=$launched",
                                 Toast.LENGTH_LONG
                             ).show()
                         }
@@ -535,9 +575,10 @@ jobs:
 
                 AlertDialog.Builder(this)
                     .setTitle("ID हटाएँ?")
-                    .setMessage("${app.name} की fake ID हटा दी जाएगी।\nअगली बार नई ID बनेगी।")
+                    .setMessage("${app.name} की सारी कॉपियों की fake ID हटा दी जाएँगी।\nअगली बार नई ID बनेगी।")
                     .setPositiveButton("हटाएँ") { _, _ ->
-                        IdentityStore.delete(this, app.packageName)
+                        IdentityStore.deleteAll(this, app.packageName)
+                        app.copies = 1
                         app.isAdded = false
                         app.fakeAndroidId = null
                         adapter.notifyDataSetChanged()
@@ -696,8 +737,10 @@ jobs:
                             val pkg = key.removeSuffix("_androidId")
                             val aid = prefs.getString(key, "") ?: ""
                             val imei = prefs.getString("${pkg}_imei", "") ?: ""
+                            // कॉपी 0 की key सिर्फ़ पैकेज होती है, बाकी की पैकेज@नंबर
+                            val bridgeKey = if (pkg.contains('@')) pkg else "$pkg@0"
                             if (aid.isNotEmpty() && imei.isNotEmpty()) {
-                                sb.append(pkg).append('|').append(aid).append('|').append(imei).append('\n')
+                                sb.append(bridgeKey).append('|').append(aid).append('|').append(imei).append('\n')
                             }
                         }
                     }
@@ -705,6 +748,32 @@ jobs:
                 } catch (e: Exception) {
                     Log.e("IdentityStore", "bridge sync fail: ${e.message}")
                 }
+            }
+
+            // कॉपी की key: कॉपी 0 = पैकेज, कॉपी N = पैकेज@N (N वर्चुअल यूज़र नंबर)
+            fun key(packageName: String, copy: Int): String =
+                if (copy == 0) packageName else "$packageName@$copy"
+
+            fun copyCount(context: Context, packageName: String): Int {
+                val prefs = context.getSharedPreferences(PREF, Context.MODE_PRIVATE)
+                return prefs.getInt("${packageName}__copies", 1).coerceAtLeast(1)
+            }
+
+            // नई कॉपी बनाओ (नई ID के साथ), नई कॉपी का नंबर लौटाओ
+            fun addCopy(context: Context, packageName: String): Int {
+                val n = copyCount(context, packageName)
+                getOrCreate(context, key(packageName, n))
+                context.getSharedPreferences(PREF, Context.MODE_PRIVATE)
+                    .edit().putInt("${packageName}__copies", n + 1).apply()
+                return n
+            }
+
+            // ऐप की सारी कॉपियों की ID हटाओ
+            fun deleteAll(context: Context, packageName: String) {
+                val n = copyCount(context, packageName)
+                for (i in 0 until n) delete(context, key(packageName, i))
+                context.getSharedPreferences(PREF, Context.MODE_PRIVATE)
+                    .edit().remove("${packageName}__copies").apply()
             }
 
             fun getAll(context: Context): List<FakeIdentity> {
