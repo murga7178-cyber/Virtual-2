@@ -26,20 +26,13 @@ jobs:
       run: |
         git clone --depth 1 https://github.com/ALEX5402/NewBlackbox.git "$RUNNER_TEMP/bb"
 
-    - name: Show Android ID related code
+    - name: Show settings provider code
       run: |
-        cd "$RUNNER_TEMP/bb/Bcore/src/main/java/top/niunaijun/blackbox"
-        echo "=== who uses AndroidIdProxy / DeviceIdProxy ==="
-        grep -rn "AndroidIdProxy\|DeviceIdProxy" . | grep -v "service/AndroidIdProxy.java\|service/DeviceIdProxy.java" | head -20 || true
-        echo "=== providers folder ==="
-        ls fake/service/context/providers/ 2>/dev/null || true
-        echo "=== settings related code ==="
-        for f in $(ls fake/service/context/providers/ 2>/dev/null | grep -i settings); do
-          echo "---- $f ----"
-          grep -v -E '^\s*import |^\s*$' "fake/service/context/providers/$f" | head -120
+        cd "$RUNNER_TEMP/bb/Bcore/src/main/java/top/niunaijun/blackbox/fake/service"
+        for f in ISettingsProviderProxy.java context/providers/SystemProviderStub.java context/providers/ContentProviderStub.java; do
+          echo "=================== $f ==================="
+          grep -v -E '^\s*import |^\s*$' "$f" | head -130
         done
-        echo "=== other settings hooks ==="
-        grep -rn "SettingsProvider\|Settings.Secure\|\"settings\"" . | head -20 || true
 
     - name: Patch BlackBox to use our fake IDs
       run: |
