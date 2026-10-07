@@ -185,10 +185,26 @@ jobs:
             <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES"
                 tools:ignore="QueryAllPackagesPermission" />
             <uses-permission android:name="android.permission.INTERNET" />
+            <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+            <uses-permission android:name="android.permission.CHANGE_NETWORK_STATE" />
+            <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
+            <uses-permission android:name="android.permission.CHANGE_WIFI_STATE" />
+            <uses-permission android:name="android.permission.WAKE_LOCK" />
+            <uses-permission android:name="android.permission.VIBRATE" />
+            <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+            <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+            <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
+            <uses-permission android:name="android.permission.RECORD_AUDIO" />
+            <uses-permission android:name="android.permission.CAMERA" />
+            <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
+            <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+            <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" />
+            <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" />
 
             <application
                 android:name=".MyApplication"
                 android:allowBackup="true"
+                android:usesCleartextTraffic="true"
                 tools:replace="android:label,android:allowBackup,android:supportsRtl,android:theme"
                 android:label="VirtualApp"
                 android:supportsRtl="true"
@@ -518,7 +534,9 @@ jobs:
         import android.graphics.Bitmap
         import android.graphics.Canvas
         import android.graphics.drawable.Drawable
+        import android.net.Uri
         import android.os.Bundle
+        import android.provider.Settings
         import android.widget.Toast
         import androidx.appcompat.app.AppCompatActivity
         import androidx.core.content.pm.ShortcutInfoCompat
@@ -622,7 +640,8 @@ jobs:
                     "🏠 होम स्क्रीन पर जोड़ें",
                     "🆔 Fake ID देखें",
                     "🔍 यह ऐप क्या-क्या पढ़ता है",
-                    "🧩 Google Play Services जोड़ें (प्रयोग)"
+                    "🧩 Google Play Services जोड़ें (प्रयोग)",
+                    "⚙️ अनुमतियाँ दें (माइक, कैमरा, लोकेशन...)"
                 )
                 AlertDialog.Builder(this)
                     .setTitle(app.name)
@@ -634,6 +653,9 @@ jobs:
                             3 -> pickCopy(app) { copy -> showIdentityDialog(app, copy) }
                             4 -> showInspect(app)
                             5 -> chooseGmsSpace()
+                            6 -> startActivity(
+                                Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:$packageName"))
+                            )
                         }
                     }
                     .setNegativeButton("बंद करें", null)
@@ -1281,6 +1303,15 @@ jobs:
         mkdir -p "$GITHUB_WORKSPACE/out"
         find app/build/outputs/apk/debug -name "*.apk" -exec cp {} "$GITHUB_WORKSPACE/out/app-debug.apk" \;
         ls -la "$GITHUB_WORKSPACE/out"
+
+    - name: Show APK permissions and target SDK
+      if: success()
+      run: |
+        AAPT2=$(ls -d "$ANDROID_HOME"/build-tools/*/aapt2 | sort -V | tail -1)
+        echo "===== sdk versions ====="
+        "$AAPT2" dump badging "$GITHUB_WORKSPACE/out/app-debug.apk" | grep -E "^sdkVersion|^targetSdkVersion" || true
+        echo "===== permissions ====="
+        "$AAPT2" dump permissions "$GITHUB_WORKSPACE/out/app-debug.apk" | head -120 || true
 
     - name: Show only the real errors
       if: failure()
