@@ -42,6 +42,7 @@ jobs:
         //BACT_IMPORT
 
         public class FakeIds {
+
             // अभी चल रहे वर्चुअल ऐप की कुंजी: पैकेज@कॉपी नंबर
             private static String currentKey() {
                 String pkg = BActivityThread.getAppPackageName();
@@ -52,6 +53,39 @@ jobs:
             public static String currentImei(String methodName) {
                 log("PHONE", methodName);
                 return read(currentKey(), 2);
+            }
+
+            public static String currentAndroidId() {
+                return read(currentKey(), 1);
+            }
+
+            private static boolean sBuildApplied = false;
+
+            // वर्चुअल ऐप शुरू होते ही Build.MODEL / BRAND / MANUFACTURER बदलो
+            public static void applyBuild() {
+                try {
+                    if (sBuildApplied) return;
+                    String[] row = readRow(currentKey());
+                    if (row == null || row.length < 5) return;
+                    String brand = row[3].trim();
+                    String model = row[4].trim();
+                    if (brand.isEmpty() || model.isEmpty()) return;
+                    sBuildApplied = true;
+                    setBuild("MODEL", model);
+                    setBuild("BRAND", brand.toLowerCase());
+                    setBuild("MANUFACTURER", brand.toLowerCase());
+                    log("BUILD", brand + " " + model);
+                } catch (Throwable ignored) {
+                }
+            }
+
+            private static void setBuild(String name, String value) {
+                try {
+                    java.lang.reflect.Field f = android.os.Build.class.getDeclaredField(name);
+                    f.setAccessible(true);
+                    f.set(null, value);
+                } catch (Throwable ignored) {
+                }
             }
 
             private static final java.util.Set<String> LOGGED =
@@ -73,10 +107,6 @@ jobs:
                     }
                 } catch (Throwable ignored) {
                 }
-            }
-
-            public static String currentAndroidId() {
-                return read(currentKey(), 1);
             }
 
             // Settings provider की call() का जवाब: android_id माँगा गया तो नकली ID डालो
@@ -111,6 +141,13 @@ jobs:
             }
 
             private static String read(String key, int col) {
+                String[] row = readRow(key);
+                if (row == null || row.length <= col) return null;
+                return row[col];
+            }
+
+            // bridge फ़ाइल की लाइन: कुंजी|androidId|imei|brand|model
+            private static String[] readRow(String key) {
                 if (key == null) return null;
                 String host = BlackBoxCore.getHostPkg();
                 String[] paths = {
@@ -125,7 +162,7 @@ jobs:
                             String line;
                             while ((line = r.readLine()) != null) {
                                 String[] p = line.split("\\|");
-                                if (p.length >= 3 && p[0].equals(key)) return p[col];
+                                if (p.length >= 3 && p[0].equals(key)) return p;
                             }
                         }
                     } catch (Throwable ignored) {
@@ -169,8 +206,27 @@ jobs:
                             'package top.niunaijun.blackbox.fake.service.context.providers;\n\nimport top.niunaijun.blackbox.fake.service.FakeIds;', 1)
             open(f, 'w', encoding='utf-8').write(s2)
             print('android id patched', f)
+        # 3) Model / Brand: वर्चुअल ऐप शुरू होते ही Build.MODEL बदलो
+        import os, glob
+        ba = '../../app/BActivityThread.java'
+        if not os.path.exists(ba):
+            found = glob.glob('../../**/BActivityThread.java', recursive=True)
+            ba = found[0] if found else None
+        if ba:
+            s = open(ba, encoding='utf-8').read()
+            pat2 = re.compile(r'(void\s+handleBindApplication\s*\([^)]*\)\s*(?:throws\s+[\w\s,.]+)?\{)')
+            s2, c = pat2.subn(lambda m: m.group(1) + '\n        top.niunaijun.blackbox.fake.service.FakeIds.applyBuild();', s, count=1)
+            if c == 1:
+                open(ba, 'w', encoding='utf-8').write(s2)
+                print('MODEL PATCH APPLIED in', ba)
+            else:
+                print('MODEL PATCH SKIPPED: handleBindApplication not found')
+        else:
+            print('MODEL PATCH SKIPPED: BActivityThread.java not found')
         VAPP_PY_EOF
         grep -n "vappInvokeOrig\|import .*FakeIds" context/providers/SystemProviderStub.java context/providers/ContentProviderStub.java | head
+        echo "===== app start code (for Model patch) ====="
+        grep -n "handleBindApplication\|makeApplication\|callApplicationOnCreate\|applyBuild" ../../app/BActivityThread.java | head -20 || true
 
     - name: Generate our app files
       run: |
@@ -445,7 +501,7 @@ jobs:
                 holder.fakeId.visibility = View.VISIBLE
                 holder.fakeId.text = if (app.isAdded) {
                     val copiesLine = if (app.copies > 1) "📋 कुल कॉपी: ${app.copies}\n" else ""
-                    copiesLine + "✅ Android ID और IMEI/डिवाइस ID: नकली लागू (वर्चुअल में चलाने पर)\n⚠️ MAC, IP, Model आदि: असली दिख सकते हैं"
+                    copiesLine + "✅ Android ID, IMEI/डिवाइस ID, Model/Brand: नकली लागू (वर्चुअल में चलाने पर)\n⚠️ MAC, IP, Serial आदि: असली दिख सकते हैं"
                 } else {
                     "⚠️ अभी नकली ID नहीं, असली पहचान दिख सकती है"
                 }
@@ -641,7 +697,8 @@ jobs:
                     "🆔 Fake ID देखें",
                     "🔍 यह ऐप क्या-क्या पढ़ता है",
                     "🧩 Google Play Services जोड़ें (प्रयोग)",
-                    "⚙️ अनुमतियाँ दें (माइक, कैमरा, लोकेशन...)"
+                    "⚙️ अनुमतियाँ दें (माइक, कैमरा, लोकेशन...)",
+                    "🧯 क्रैश का रिकॉर्ड देखें"
                 )
                 AlertDialog.Builder(this)
                     .setTitle(app.name)
@@ -656,6 +713,7 @@ jobs:
                             6 -> startActivity(
                                 Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:$packageName"))
                             )
+                            7 -> showCrashLog()
                         }
                     }
                     .setNegativeButton("बंद करें", null)
@@ -731,6 +789,8 @@ jobs:
                     ✅ वर्चुअल में चलाने पर लागू होती हैं:
                     🆔 Android ID: ${id.androidId}
                     📞 IMEI / Device ID / Subscriber ID: ${id.imei}
+                    📦 Model: ${id.model}
+                    🏢 Brand: ${id.brand}
 
                     ⚠️ अभी लागू नहीं (सिर्फ़ बनी हुई):
                     📶 WiFi MAC: ${id.wifiMac}
@@ -738,8 +798,6 @@ jobs:
                     🌐 WiFi IP: ${id.wifiIp}
                     📡 Mobile IP: ${id.mobileIp}
                     🔢 Serial: ${id.serial}
-                    📦 Model: ${id.model}
-                    🏢 Brand: ${id.brand}
                     🤖 Android Version: ${id.androidVersion}
                 """.trimIndent()
 
@@ -791,6 +849,31 @@ jobs:
                     }
                     .setNeutralButton("रिकॉर्ड साफ़ करें") { _, _ ->
                         AppInspector.clearLog(this)
+                        Toast.makeText(this, "रिकॉर्ड साफ़ हो गया", Toast.LENGTH_SHORT).show()
+                    }
+                    .setNegativeButton("बंद करें", null)
+                    .show()
+            }
+
+            // वर्चुअल ऐप क्रैश हुए तो उनका कारण (आख़िरी हिस्सा)
+            private fun showCrashLog() {
+                val f = java.io.File(filesDir, MyApplication.CRASH_LOG)
+                val text = if (f.exists() && f.length() > 0) {
+                    val all = f.readText()
+                    if (all.length > 3500) "…" + all.takeLast(3500) else all
+                } else {
+                    "अभी कोई क्रैश रिकॉर्ड नहीं है। ऐप क्रैश हो, फिर दोबारा यहाँ देखें।"
+                }
+                AlertDialog.Builder(this)
+                    .setTitle("🧯 क्रैश का रिकॉर्ड")
+                    .setMessage(text)
+                    .setPositiveButton("Copy") { _, _ ->
+                        val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                        clipboard.setPrimaryClip(ClipData.newPlainText("CrashLog", text))
+                        Toast.makeText(this, "Copy हो गया", Toast.LENGTH_SHORT).show()
+                    }
+                    .setNeutralButton("साफ़ करें") { _, _ ->
+                        f.delete()
                         Toast.makeText(this, "रिकॉर्ड साफ़ हो गया", Toast.LENGTH_SHORT).show()
                     }
                     .setNegativeButton("बंद करें", null)
@@ -927,7 +1010,9 @@ jobs:
 
         import android.app.Application
         import android.content.Context
+        import android.os.Build
         import android.util.Log
+        import android.webkit.WebView
         import top.niunaijun.blackbox.BlackBoxCore
         import top.niunaijun.blackbox.app.configuration.ClientConfiguration
         import java.io.File
@@ -947,6 +1032,8 @@ jobs:
 
             override fun onCreate() {
                 super.onCreate()
+                installCrashLogger()
+                fixWebViewForVirtualProcess()
                 try {
                     BlackBoxCore.get().doCreate()
                 } catch (e: Throwable) {
@@ -957,8 +1044,40 @@ jobs:
                 Log.d("VirtualApp", "Virtual dir ready: ${virtualDir.absolutePath}")
             }
 
+            // हर वर्चुअल प्रोसेस (:p0, :p1...) का अपना WebView फ़ोल्डर, वरना विज्ञापन (WebView) चलाते ही क्रैश हो सकता है
+            private fun fixWebViewForVirtualProcess() {
+                if (Build.VERSION.SDK_INT < 28) return
+                try {
+                    val pn = Application.getProcessName() ?: return
+                    if (pn != packageName && pn.contains(":")) {
+                        WebView.setDataDirectorySuffix(pn.substringAfter(':'))
+                    }
+                } catch (e: Throwable) {
+                    Log.w("VirtualApp", "WebView suffix fail: ${e.message}")
+                }
+            }
+
+            // हर क्रैश का कारण files/crash.log में लिखो (ऐप के मेन्यू से देख सकते हैं)
+            private fun installCrashLogger() {
+                val previous = Thread.getDefaultUncaughtExceptionHandler()
+                Thread.setDefaultUncaughtExceptionHandler { thread, error ->
+                    try {
+                        val f = File(filesDir, CRASH_LOG)
+                        if (f.exists() && f.length() > 100_000) f.writeText("")
+                        val proc = if (Build.VERSION.SDK_INT >= 28) Application.getProcessName() else ""
+                        f.appendText(
+                            "=== ${System.currentTimeMillis()} | $proc | ${thread.name}\n" +
+                                Log.getStackTraceString(error).take(2500) + "\n\n"
+                        )
+                    } catch (e: Throwable) {
+                    }
+                    previous?.uncaughtException(thread, error)
+                }
+            }
+
             companion object {
                 const val VIRTUAL_USER_ID = 0
+                const val CRASH_LOG = "crash.log"
 
                 fun copyApkToVirtual(context: Context, packageName: String): String? {
                     return try {
@@ -1025,6 +1144,7 @@ jobs:
                     )
                 }
 
+                val device = DEVICES.random()
                 val newIdentity = FakeIdentity(
                     packageName = packageName,
                     androidId = randomHex(16),
@@ -1034,10 +1154,10 @@ jobs:
                     wifiIp = randomIp(),
                     mobileIp = randomIp(),
                     serial = randomHex(12).uppercase(),
-                    model = "SM-${randomHex(4).uppercase()}",
-                    brand = "Samsung",
+                    model = device.second,
+                    brand = device.first,
                     androidVersion = "13",
-                    fingerprint = "samsung/${randomHex(6)}/${randomHex(6)}:13/TP1A.220624.014/${randomHex(8)}:user/release-keys"
+                    fingerprint = "${device.first.lowercase()}/${randomHex(6)}/${randomHex(6)}:13/TP1A.220624.014/${randomHex(8)}:user/release-keys"
                 )
 
                 prefs.edit()
@@ -1071,8 +1191,11 @@ jobs:
                             val imei = prefs.getString("${pkg}_imei", "") ?: ""
                             // कॉपी 0 की key सिर्फ़ पैकेज होती है, बाकी की पैकेज@नंबर
                             val bridgeKey = if (pkg.contains('@')) pkg else "$pkg@0"
+                            val brand = (prefs.getString("${pkg}_brand", "") ?: "").replace("|", "/")
+                            val model = (prefs.getString("${pkg}_model", "") ?: "").replace("|", "/")
                             if (aid.isNotEmpty() && imei.isNotEmpty()) {
-                                sb.append(bridgeKey).append('|').append(aid).append('|').append(imei).append('\n')
+                                sb.append(bridgeKey).append('|').append(aid).append('|').append(imei)
+                                    .append('|').append(brand).append('|').append(model).append('\n')
                             }
                         }
                     }
@@ -1081,6 +1204,26 @@ jobs:
                     Log.e("IdentityStore", "bridge sync fail: ${e.message}")
                 }
             }
+
+            // (ब्रांड, मॉडल) की असली-जैसी जोड़ियाँ, हर नई कॉपी में अलग ब्रांड आ सकता है
+            private val DEVICES = listOf(
+                "Samsung" to "SM-A546B",
+                "Samsung" to "SM-S918B",
+                "Samsung" to "SM-A346B",
+                "Samsung" to "SM-M336B",
+                "Xiaomi" to "23053RN02A",
+                "Xiaomi" to "M2101K6G",
+                "Xiaomi" to "2201117TI",
+                "OPPO" to "CPH2387",
+                "OPPO" to "CPH2269",
+                "vivo" to "V2250",
+                "vivo" to "V2230",
+                "realme" to "RMX3511",
+                "realme" to "RMX3690",
+                "OnePlus" to "CPH2465",
+                "motorola" to "moto g84 5G",
+                "Google" to "Pixel 7"
+            )
 
             // कॉपी की key: कॉपी 0 = पैकेज, कॉपी N = पैकेज@N (N वर्चुअल यूज़र नंबर)
             fun key(packageName: String, copy: Int): String =
