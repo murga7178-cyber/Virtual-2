@@ -1,0 +1,1551 @@
+name: Virtual All-in-One APK
+
+# यह अकेली फ़ाइल NewBlackbox डाउनलोड करती है, उसमें आपके ऐप का कोड (नीचे इसी फ़ाइल में) डालती है और APK बनाती है।
+on:
+  push:
+    branches: [ "main" ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Set up JDK 21
+      uses: actions/setup-java@v4
+      with:
+        distribution: 'temurin'
+        java-version: '21'
+
+    - name: Install NDK for BlackBox
+      run: |
+        yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null || true
+        "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "ndk;29.0.13846066" "cmake;3.22.1"
+
+    - name: Download NewBlackbox
+      run: |
+        git clone --depth 1 https://github.com/ALEX5402/NewBlackbox.git "$RUNNER_TEMP/bb"
+
+    - name: Patch BlackBox to use our fake IDs
+      run: |
+        cd "$RUNNER_TEMP/bb/Bcore/src/main/java/top/niunaijun/blackbox/fake/service"
+        cat > FakeIds.java <<'VAPP_JAVA_EOF'
+        package top.niunaijun.blackbox.fake.service;
+
+        import android.os.Bundle;
+
+        import java.io.BufferedReader;
+        import java.io.File;
+        import java.io.FileReader;
+
+        import top.niunaijun.blackbox.BlackBoxCore;
+        //BACT_IMPORT
+
+        public class FakeIds {
+
+            // अभी चल रहे वर्चुअल ऐप की कुंजी: पैकेज@कॉपी नंबर
+            private static String currentKey() {
+                String pkg = BActivityThread.getAppPackageName();
+                if (pkg == null) return null;
+                return pkg + "@" + BActivityThread.getUserId();
+            }
+
+            public static String currentImei(String methodName) {
+                log("PHONE", methodName);
+                return read(currentKey(), 2);
+            }
+
+            public static String currentAndroidId() {
+                return read(currentKey(), 1);
+            }
+
+            // इस कॉपी का नकली WiFi IP (bridge फ़ाइल का कॉलम 5)
+            public static String currentWifiIp() {
+                return read(currentKey(), 5);
+            }
+
+            // WifiInfo लौटते समय उसका IP नकली IP से बदलो (सिर्फ़ ऐप के अंदर)
+            public static Object fixWifiInfo(Object result) {
+                try {
+                    if (!(result instanceof android.net.wifi.WifiInfo)) return result;
+                    log("WIFI", "getConnectionInfo");
+                    String ip = currentWifiIp();
+                    if (ip == null || ip.isEmpty()) return result;
+                    java.net.InetAddress addr = java.net.InetAddress.getByName(ip);
+                    try {
+                        java.lang.reflect.Method m = android.net.wifi.WifiInfo.class
+                                .getDeclaredMethod("setInetAddress", java.net.InetAddress.class);
+                        m.setAccessible(true);
+                        m.invoke(result, addr);
+                    } catch (Throwable t1) {
+                        java.lang.reflect.Field f = android.net.wifi.WifiInfo.class.getDeclaredField("mIpAddress");
+                        f.setAccessible(true);
+                        if (f.getType() == int.class) {
+                            byte[] b = addr.getAddress();
+                            f.setInt(result, (b[0] & 0xff) | ((b[1] & 0xff) << 8) | ((b[2] & 0xff) << 16) | ((b[3] & 0xff) << 24));
+                        } else {
+                            f.set(result, addr);
+                        }
+                    }
+                    log("WIFI", "ip set " + ip);
+                } catch (Throwable ignored) {
+                }
+                return result;
+            }
+
+            private static boolean sBuildApplied = false;
+
+            // वर्चुअल ऐप शुरू होते ही Build.MODEL / BRAND / MANUFACTURER बदलो
+            public static void applyBuild() {
+                try {
+                    if (sBuildApplied) return;
+                    String[] row = readRow(currentKey());
+                    if (row == null || row.length < 5) return;
+                    String brand = row[3].trim();
+                    String model = row[4].trim();
+                    if (brand.isEmpty() || model.isEmpty()) return;
+                    sBuildApplied = true;
+                    setBuild("MODEL", model);
+                    setBuild("BRAND", brand.toLowerCase());
+                    setBuild("MANUFACTURER", brand.toLowerCase());
+                    log("BUILD", brand + " " + model);
+                } catch (Throwable ignored) {
+                }
+            }
+
+            private static void setBuild(String name, String value) {
+                try {
+                    java.lang.reflect.Field f = android.os.Build.class.getDeclaredField(name);
+                    f.setAccessible(true);
+                    f.set(null, value);
+                } catch (Throwable ignored) {
+                }
+            }
+
+            private static final java.util.Set<String> LOGGED =
+                    java.util.Collections.synchronizedSet(new java.util.HashSet<String>());
+
+            // कौन-सा ऐप कौन-सी जानकारी माँग रहा है, इसका रिकॉर्ड (हर प्रोसेस में एक बार)
+            public static void log(String kind, String name) {
+                try {
+                    String key = currentKey();
+                    if (key == null) return;
+                    String clean = (name == null ? "" : name).replace("|", "/").replace("\n", " ");
+                    if (clean.length() > 80) clean = clean.substring(0, 80);
+                    if (!LOGGED.add(key + "|" + kind + "|" + clean)) return;
+                    String host = BlackBoxCore.getHostPkg();
+                    File f = new File("/data/data/" + host + "/files/id_access.log");
+                    if (f.exists() && f.length() > 200000) return;
+                    try (java.io.FileWriter w = new java.io.FileWriter(f, true)) {
+                        w.write(System.currentTimeMillis() + "|" + key + "|" + kind + "|" + clean + "\n");
+                    }
+                } catch (Throwable ignored) {
+                }
+            }
+
+            // Settings provider की call() का जवाब: android_id माँगा गया तो नकली ID डालो
+            public static Object fixSettingsCall(Object[] args, Object result) {
+                try {
+                    if (args != null) {
+                        for (int i = 0; i < args.length - 1; i++) {
+                            if (args[i] instanceof String && ((String) args[i]).startsWith("GET_")
+                                    && args[i + 1] instanceof String) {
+                                log("SETTING", ((String) args[i]).substring(4) + "/" + args[i + 1]);
+                                break;
+                            }
+                        }
+                    }
+                    if (args == null || !(result instanceof Bundle)) return result;
+                    boolean isAndroidId = false;
+                    for (Object a : args) {
+                        if ("android_id".equals(a)) {
+                            isAndroidId = true;
+                            break;
+                        }
+                    }
+                    if (!isAndroidId) return result;
+                    String fake = currentAndroidId();
+                    if (fake == null) return result;
+                    Bundle b = new Bundle((Bundle) result);
+                    b.putString("value", fake);
+                    return b;
+                } catch (Throwable t) {
+                    return result;
+                }
+            }
+
+            private static String read(String key, int col) {
+                String[] row = readRow(key);
+                if (row == null || row.length <= col) return null;
+                return row[col];
+            }
+
+            // bridge फ़ाइल की लाइन: कुंजी|androidId|imei|brand|model
+            private static String[] readRow(String key) {
+                if (key == null) return null;
+                String host = BlackBoxCore.getHostPkg();
+                String[] paths = {
+                        "/data/data/" + host + "/files/fake_ids.txt",
+                        "/data/user/0/" + host + "/files/fake_ids.txt"
+                };
+                for (String path : paths) {
+                    try {
+                        File f = new File(path);
+                        if (!f.exists()) continue;
+                        try (BufferedReader r = new BufferedReader(new FileReader(f))) {
+                            String line;
+                            while ((line = r.readLine()) != null) {
+                                String[] p = line.split("\\|");
+                                if (p.length >= 3 && p[0].equals(key)) return p;
+                            }
+                        }
+                    } catch (Throwable ignored) {
+                    }
+                }
+                return null;
+            }
+        }
+        VAPP_JAVA_EOF
+        IMP=$(grep -h "^import .*\.BActivityThread;" ITelephonyManagerProxy.java | head -1)
+        if [ -z "$IMP" ]; then echo "PATCH FAILED: BActivityThread import not found"; exit 1; fi
+        sed -i "s|//BACT_IMPORT|$IMP|" FakeIds.java
+        python3 - <<'VAPP_PY_EOF'
+        import re
+        # 1) IMEI / Device ID / Subscriber ID
+        p = 'ITelephonyManagerProxy.java'
+        s = open(p, encoding='utf-8').read()
+        old = 'return Md5Utils.md5(BlackBoxCore.getHostPkg());'
+        n = s.count(old)
+        if n < 4:
+            raise SystemExit('PATCH FAILED: telephony expected at least 4 matches, found %d' % n)
+        new = 'String vappId = FakeIds.currentImei(method.getName()); return vappId != null ? vappId : Md5Utils.md5(BlackBoxCore.getHostPkg());'
+        open(p, 'w', encoding='utf-8').write(s.replace(old, new))
+        print('telephony patched', n, 'places')
+        # 2) Android ID (Settings provider call)
+        pat = re.compile(r'public\s+Object\s+invoke\s*\(\s*Object\s+proxy\s*,\s*Method\s+method\s*,\s*Object\[\]\s+args\s*\)\s+throws\s+Throwable\s*\{')
+        repl = ('public Object invoke(Object proxy, Method method, Object[] args) throws Throwable {\n'
+                '        Object vappResult = vappInvokeOrig(proxy, method, args);\n'
+                '        if (method != null && "call".equals(method.getName())) {\n'
+                '            return FakeIds.fixSettingsCall(args, vappResult);\n'
+                '        }\n'
+                '        return vappResult;\n'
+                '    }\n\n'
+                '    private Object vappInvokeOrig(Object proxy, Method method, Object[] args) throws Throwable {')
+        for f in ['context/providers/SystemProviderStub.java', 'context/providers/ContentProviderStub.java']:
+            s = open(f, encoding='utf-8').read()
+            s2, c = pat.subn(lambda m: repl, s)
+            if c != 1:
+                raise SystemExit('PATCH FAILED: invoke() in %s found %d times' % (f, c))
+            s2 = s2.replace('package top.niunaijun.blackbox.fake.service.context.providers;',
+                            'package top.niunaijun.blackbox.fake.service.context.providers;\n\nimport top.niunaijun.blackbox.fake.service.FakeIds;', 1)
+            open(f, 'w', encoding='utf-8').write(s2)
+            print('android id patched', f)
+        # 3) Model / Brand: वर्चुअल ऐप शुरू होते ही Build.MODEL बदलो
+        import os, glob
+        ba = '../../app/BActivityThread.java'
+        if not os.path.exists(ba):
+            found = glob.glob('../../**/BActivityThread.java', recursive=True)
+            ba = found[0] if found else None
+        # 4) WiFi IP: हर binder call का नतीजा जाँचो, getConnectionInfo हो तो IP बदलो (best effort)
+        try:
+            cis = glob.glob('../../**/ClassInvocationStub.java', recursive=True)
+            if cis:
+                cp = cis[0]
+                cs = open(cp, encoding='utf-8').read()
+                repl2 = ('public Object invoke(Object proxy, Method method, Object[] args) throws Throwable {\n'
+                         '        Object vappResult = vappInvokeOrig(proxy, method, args);\n'
+                         '        if (method != null && "getConnectionInfo".equals(method.getName())) {\n'
+                         '            return top.niunaijun.blackbox.fake.service.FakeIds.fixWifiInfo(vappResult);\n'
+                         '        }\n'
+                         '        return vappResult;\n'
+                         '    }\n\n'
+                         '    private Object vappInvokeOrig(Object proxy, Method method, Object[] args) throws Throwable {')
+                cs2, cc = pat.subn(lambda m: repl2, cs, count=1)
+                if cc == 1:
+                    open(cp, 'w', encoding='utf-8').write(cs2)
+                    print('WIFI IP PATCH APPLIED in', cp)
+                else:
+                    print('WIFI IP PATCH SKIPPED: invoke() found', cc, 'in', cp)
+            else:
+                print('WIFI IP PATCH SKIPPED: ClassInvocationStub.java not found')
+        except Exception as e:
+            print('WIFI IP PATCH SKIPPED:', e)
+        if ba:
+            s = open(ba, encoding='utf-8').read()
+            pat2 = re.compile(r'(void\s+handleBindApplication\s*\([^)]*\)\s*(?:throws\s+[\w\s,.]+)?\{)')
+            s2, c = pat2.subn(lambda m: m.group(1) + '\n        top.niunaijun.blackbox.fake.service.FakeIds.applyBuild();', s, count=1)
+            if c == 1:
+                open(ba, 'w', encoding='utf-8').write(s2)
+                print('MODEL PATCH APPLIED in', ba)
+            else:
+                print('MODEL PATCH SKIPPED: handleBindApplication not found')
+        else:
+            print('MODEL PATCH SKIPPED: BActivityThread.java not found')
+        VAPP_PY_EOF
+        grep -n "vappInvokeOrig\|import .*FakeIds" context/providers/SystemProviderStub.java context/providers/ContentProviderStub.java | head
+        echo "===== app start code (for Model patch) ====="
+        grep -n "handleBindApplication\|makeApplication\|callApplicationOnCreate\|applyBuild" ../../app/BActivityThread.java | head -20 || true
+
+    - name: Generate our app files
+      run: |
+        mkdir -p "$RUNNER_TEMP/vapp"
+        cd "$RUNNER_TEMP/vapp"
+        mkdir -p "app/src/main"
+        cat > "app/src/main/AndroidManifest.xml" <<'VAPP_EOF_0'
+        <?xml version="1.0" encoding="utf-8"?>
+        <manifest xmlns:android="http://schemas.android.com/apk/res/android"
+            xmlns:tools="http://schemas.android.com/tools">
+
+            <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES"
+                tools:ignore="QueryAllPackagesPermission" />
+            <uses-permission android:name="android.permission.INTERNET" />
+            <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+            <uses-permission android:name="android.permission.CHANGE_NETWORK_STATE" />
+            <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
+            <uses-permission android:name="android.permission.CHANGE_WIFI_STATE" />
+            <uses-permission android:name="android.permission.WAKE_LOCK" />
+            <uses-permission android:name="android.permission.VIBRATE" />
+            <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+            <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+            <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
+            <uses-permission android:name="android.permission.RECORD_AUDIO" />
+            <uses-permission android:name="android.permission.CAMERA" />
+            <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
+            <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+            <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" />
+            <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" />
+
+            <application
+                android:name=".MyApplication"
+                android:allowBackup="true"
+                android:usesCleartextTraffic="true"
+                tools:replace="android:label,android:allowBackup,android:supportsRtl,android:theme"
+                android:label="VirtualApp"
+                android:supportsRtl="true"
+                android:theme="@style/Theme.VirtualApp">
+
+                <activity
+                    android:name=".MainActivity"
+                    android:exported="true">
+                    <intent-filter>
+                        <action android:name="android.intent.action.MAIN" />
+                        <category android:name="android.intent.category.LAUNCHER" />
+                    </intent-filter>
+                </activity>
+
+                <activity
+                    android:name=".LaunchActivity"
+                    android:exported="true"
+                    android:excludeFromRecents="true"
+                    android:taskAffinity=""
+                    android:theme="@android:style/Theme.Translucent.NoTitleBar" />
+
+            </application>
+        </manifest>
+        VAPP_EOF_0
+        mkdir -p "app/src/main/java/com/example/virtualapp"
+        cat > "app/src/main/java/com/example/virtualapp/AppInfo.kt" <<'VAPP_EOF_1'
+        package com.example.virtualapp
+
+        import android.graphics.drawable.Drawable
+
+        data class AppInfo(
+            val name: String,
+            val packageName: String,
+            val icon: Drawable,
+            var isAdded: Boolean = false,
+            var fakeAndroidId: String? = null,
+            var copies: Int = 1
+        )
+        VAPP_EOF_1
+        mkdir -p "app/src/main/java/com/example/virtualapp"
+        cat > "app/src/main/java/com/example/virtualapp/AppInspector.kt" <<'VAPP_EOF_2'
+        package com.example.virtualapp
+
+        import android.content.Context
+        import android.content.pm.PackageInfo
+        import android.content.pm.PackageManager
+        import java.io.File
+        import java.text.SimpleDateFormat
+        import java.util.Date
+        import java.util.Locale
+
+        // किसी ऐप की पहचान से जुड़ी जानकारी: (1) ऐप की अपनी घोषणाएँ, (2) वर्चुअल में चलाने पर उसने क्या माँगा
+        object AppInspector {
+
+            const val LOG_NAME = "id_access.log"
+
+            private val PERMISSION_INFO = linkedMapOf(
+                "com.google.android.gms.permission.AD_ID" to "📢 विज्ञापन ID (Advertising ID) पढ़ सकता है",
+                "android.permission.READ_PHONE_STATE" to "📞 फ़ोन की पहचान (सिम/IMEI जैसी) पढ़ने की माँग",
+                "android.permission.READ_PRIVILEGED_PHONE_STATE" to "📞 खास फ़ोन पहचान (आम ऐप को नहीं मिलती)",
+                "android.permission.READ_PHONE_NUMBERS" to "📱 आपका फ़ोन नंबर पढ़ सकता है",
+                "android.permission.GET_ACCOUNTS" to "👤 फ़ोन के खाते (ईमेल) देख सकता है",
+                "android.permission.ACCESS_WIFI_STATE" to "📶 WiFi की जानकारी पढ़ सकता है",
+                "android.permission.BLUETOOTH" to "🔵 Bluetooth की जानकारी पढ़ सकता है",
+                "android.permission.BLUETOOTH_CONNECT" to "🔵 पास के Bluetooth उपकरण देख सकता है",
+                "android.permission.ACCESS_FINE_LOCATION" to "📍 सटीक लोकेशन",
+                "android.permission.ACCESS_COARSE_LOCATION" to "📍 मोटा लोकेशन",
+                "android.permission.QUERY_ALL_PACKAGES" to "🗂️ फ़ोन के सारे इंस्टॉल ऐप की सूची देख सकता है",
+                "com.google.android.finsky.permission.BIND_GET_INSTALL_REFERRER_SERVICE" to "🔗 इंस्टॉल रेफ़रर (किस लिंक से इंस्टॉल हुआ) पढ़ सकता है",
+                "android.permission.READ_CONTACTS" to "📇 संपर्क पढ़ सकता है",
+                "android.permission.READ_SMS" to "💬 SMS पढ़ सकता है",
+                "android.permission.READ_CALL_LOG" to "☎️ कॉल लॉग पढ़ सकता है",
+                "android.permission.CAMERA" to "📷 कैमरा",
+                "android.permission.RECORD_AUDIO" to "🎤 माइक्रोफ़ोन"
+            )
+
+            private val TRACKERS = listOf(
+                "com.google.android.gms.ads" to "Google Ads (AdMob)",
+                "com.google.firebase.analytics" to "Firebase Analytics",
+                "com.google.android.gms.measurement" to "Google Analytics",
+                "com.google.firebase.crashlytics" to "Crashlytics",
+                "com.facebook" to "Facebook SDK",
+                "com.appsflyer" to "AppsFlyer",
+                "com.adjust.sdk" to "Adjust",
+                "io.branch" to "Branch",
+                "com.onesignal" to "OneSignal",
+                "com.unity3d.ads" to "Unity Ads",
+                "com.applovin" to "AppLovin",
+                "com.ironsource" to "ironSource",
+                "com.vungle" to "Vungle",
+                "com.chartboost" to "Chartboost",
+                "com.mbridge" to "Mintegral",
+                "com.bytedance" to "TikTok / Pangle",
+                "com.inmobi" to "InMobi",
+                "com.startapp" to "StartApp",
+                "com.moengage" to "MoEngage",
+                "com.clevertap" to "CleverTap",
+                "com.mixpanel" to "Mixpanel",
+                "com.amplitude" to "Amplitude",
+                "com.flurry" to "Flurry",
+                "com.singular" to "Singular",
+                "com.kochava" to "Kochava"
+            )
+
+            private fun loadInfo(pm: PackageManager, pkg: String): PackageInfo? {
+                val full = PackageManager.GET_PERMISSIONS or PackageManager.GET_ACTIVITIES or
+                    PackageManager.GET_SERVICES or PackageManager.GET_RECEIVERS or PackageManager.GET_PROVIDERS
+                return try {
+                    pm.getPackageInfo(pkg, full)
+                } catch (e: Throwable) {
+                    try {
+                        pm.getPackageInfo(pkg, PackageManager.GET_PERMISSIONS)
+                    } catch (e2: Throwable) {
+                        null
+                    }
+                }
+            }
+
+            fun staticReport(context: Context, pkg: String): String {
+                val info = loadInfo(context.packageManager, pkg)
+                    ?: return "ऐप की जानकारी पढ़ी नहीं जा सकी।"
+
+                val perms = info.requestedPermissions?.toSet() ?: emptySet()
+                val found = PERMISSION_INFO.filterKeys { it in perms }
+
+                val names = ArrayList<String>()
+                info.activities?.forEach { names.add(it.name) }
+                info.services?.forEach { names.add(it.name) }
+                info.receivers?.forEach { names.add(it.name) }
+                info.providers?.forEach { names.add(it.name) }
+                val trackers = TRACKERS.filter { (prefix, _) -> names.any { it.startsWith(prefix) } }
+                    .map { it.second }.distinct()
+
+                val sb = StringBuilder()
+                sb.append("📋 ऐप की अपनी घोषणा (चलाए बिना भी दिखती है)\n\n")
+
+                sb.append("🔐 पहचान/जानकारी से जुड़ी अनुमतियाँ:\n")
+                if (found.isEmpty()) sb.append("• कोई खास नहीं मिली\n")
+                for ((_, text) in found) sb.append("• ").append(text).append('\n')
+
+                sb.append("\n📡 ट्रैकिंग / विज्ञापन SDK:\n")
+                if (trackers.isEmpty()) sb.append("• कोई जाना-पहचाना नहीं मिला\n")
+                for (t in trackers) sb.append("• ").append(t).append('\n')
+
+                sb.append("\n🎯 ऐप आपको कैसे पहचान सकता है:\n")
+                sb.append("• Android ID: कोई भी ऐप बिना अनुमति के पढ़ सकता है\n")
+                if ("com.google.android.gms.permission.AD_ID" in perms || trackers.isNotEmpty()) {
+                    sb.append("• विज्ञापन ID: इस ऐप में है, यह पहचान का सबसे आम तरीका है\n")
+                } else {
+                    sb.append("• विज्ञापन ID: इसकी अनुमति घोषित नहीं दिखी\n")
+                }
+                sb.append("• IMEI / असली MAC: Android 10 और ऊपर में आम ऐप ये नहीं पढ़ पाते\n")
+                return sb.toString()
+            }
+
+            fun dynamicReport(context: Context, pkg: String): String {
+                val sb = StringBuilder()
+                sb.append("▶ वर्चुअल में चलाने पर इसने क्या माँगा\n\n")
+                val f = File(context.filesDir, LOG_NAME)
+                if (!f.exists()) {
+                    sb.append("• अभी कोई रिकॉर्ड नहीं। ऐप को वर्चुअल में चलाकर कुछ देर इस्तेमाल करें, फिर दोबारा देखें।\n")
+                    return sb.toString()
+                }
+                val counts = LinkedHashMap<String, Int>()
+                val last = HashMap<String, Long>()
+                try {
+                    f.forEachLine { line ->
+                        val p = line.split("|")
+                        if (p.size >= 4 && p[1].startsWith("$pkg@")) {
+                            val k = p[2] + "|" + p[3]
+                            counts[k] = (counts[k] ?: 0) + 1
+                            last[k] = p[0].toLongOrNull() ?: 0L
+                        }
+                    }
+                } catch (e: Throwable) {
+                    sb.append("• लॉग पढ़ा नहीं जा सका\n")
+                    return sb.toString()
+                }
+                if (counts.isEmpty()) {
+                    sb.append("• इस ऐप का अभी कोई रिकॉर्ड नहीं।\n")
+                    return sb.toString()
+                }
+                val fmt = SimpleDateFormat("dd MMM, HH:mm", Locale.getDefault())
+                for ((k, n) in counts) {
+                    val kind = k.substringBefore('|')
+                    val name = k.substringAfter('|')
+                    val label = if (kind == "PHONE") "📞 फ़ोन ID माँगी" else "⚙️ सेटिंग पढ़ी"
+                    sb.append("• $label: $name ($n बार चलाने में, आख़िरी ${fmt.format(Date(last[k] ?: 0L))})\n")
+                }
+                sb.append("\nनोट: यह सिर्फ़ वही दिखाता है जो BlackBox पकड़ पाता है। विज्ञापन ID Google Play Services से आती है, वह यहाँ नहीं दिखेगी।\n")
+                return sb.toString()
+            }
+
+            fun clearLog(context: Context) {
+                try {
+                    File(context.filesDir, LOG_NAME).delete()
+                } catch (e: Throwable) {
+                }
+            }
+        }
+        VAPP_EOF_2
+        mkdir -p "app/src/main/java/com/example/virtualapp"
+        cat > "app/src/main/java/com/example/virtualapp/AppListAdapter.kt" <<'VAPP_EOF_3'
+        package com.example.virtualapp
+
+        import android.view.LayoutInflater
+        import android.view.View
+        import android.view.ViewGroup
+        import android.widget.ImageView
+        import android.widget.TextView
+        import androidx.recyclerview.widget.RecyclerView
+
+        class AppListAdapter(
+            private val apps: List<AppInfo>,
+            private val onClick: (AppInfo) -> Unit,
+            private val onLongClick: (AppInfo) -> Unit
+        ) : RecyclerView.Adapter<AppListAdapter.VH>() {
+
+            class VH(view: View) : RecyclerView.ViewHolder(view) {
+                val icon: ImageView = view.findViewById(R.id.appIcon)
+                val name: TextView = view.findViewById(R.id.appName)
+                val pkg: TextView = view.findViewById(R.id.appPkg)
+                val fakeId: TextView = view.findViewById(R.id.fakeIdText)
+            }
+
+            override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): VH {
+                val v = LayoutInflater.from(parent.context)
+                    .inflate(R.layout.item_app, parent, false)
+                return VH(v)
+            }
+
+            override fun onBindViewHolder(holder: VH, position: Int) {
+                val app = apps[position]
+                holder.icon.setImageDrawable(app.icon)
+                holder.name.text = app.name
+                holder.pkg.text = app.packageName
+
+                holder.fakeId.visibility = View.VISIBLE
+                holder.fakeId.text = if (app.isAdded) {
+                    val copiesLine = if (app.copies > 1) "📋 कुल कॉपी: ${app.copies}\n" else ""
+                    copiesLine + "✅ Android ID, IMEI/डिवाइस ID, Model/Brand: नकली लागू (वर्चुअल में चलाने पर)\n⚠️ MAC, IP, Serial आदि: असली दिख सकते हैं"
+                } else {
+                    "⚠️ अभी नकली ID नहीं, असली पहचान दिख सकती है"
+                }
+
+                holder.itemView.setOnClickListener { onClick(app) }
+                holder.itemView.setOnLongClickListener {
+                    onLongClick(app)
+                    true
+                }
+            }
+
+            override fun getItemCount() = apps.size
+        }
+        VAPP_EOF_3
+        mkdir -p "app/src/main/java/com/example/virtualapp"
+        cat > "app/src/main/java/com/example/virtualapp/LaunchActivity.kt" <<'VAPP_EOF_4'
+        package com.example.virtualapp
+
+        import android.app.Activity
+        import android.os.Bundle
+        import android.widget.Toast
+        import com.example.virtualapp.data.IdentityStore
+        import top.niunaijun.blackbox.BlackBoxCore
+
+        // होम स्क्रीन शॉर्टकट से सीधे वर्चुअल ऐप खोलने वाली बिना-स्क्रीन की Activity
+        class LaunchActivity : Activity() {
+
+            override fun onCreate(savedInstanceState: Bundle?) {
+                super.onCreate(savedInstanceState)
+                val pkg = intent.getStringExtra(EXTRA_PKG)
+                if (pkg == null) {
+                    finish()
+                    return
+                }
+                val userId = intent.getIntExtra(EXTRA_USER, 0)
+                val appCtx = applicationContext
+                IdentityStore.getOrCreate(appCtx, IdentityStore.key(pkg, userId))
+                IdentityStore.syncBridge(appCtx)
+                Thread {
+                    try {
+                        // पहले सीधे खोलने की कोशिश (वर्चुअल कॉपी पहले से हो तो असली ऐप ज़रूरी नहीं)
+                        var ok = try {
+                            BlackBoxCore.get().launchApk(pkg, userId)
+                        } catch (e: Throwable) {
+                            false
+                        }
+                        if (!ok) {
+                            BlackBoxCore.get().installPackageAsUser(pkg, userId)
+                            ok = BlackBoxCore.get().launchApk(pkg, userId)
+                        }
+                        if (!ok) {
+                            runOnUiThread {
+                                Toast.makeText(appCtx, "ऐप नहीं खुल पाया", Toast.LENGTH_LONG).show()
+                            }
+                        }
+                    } catch (e: Throwable) {
+                        runOnUiThread {
+                            Toast.makeText(
+                                appCtx,
+                                "नहीं खुला: ${e.javaClass.simpleName}: ${e.message}",
+                                Toast.LENGTH_LONG
+                            ).show()
+                        }
+                    }
+                    runOnUiThread { finish() }
+                }.start()
+            }
+
+            companion object {
+                const val EXTRA_PKG = "pkg"
+                const val EXTRA_USER = "user"
+            }
+        }
+        VAPP_EOF_4
+        mkdir -p "app/src/main/java/com/example/virtualapp"
+        cat > "app/src/main/java/com/example/virtualapp/MainActivity.kt" <<'VAPP_EOF_5'
+        package com.example.virtualapp
+
+        import android.app.AlertDialog
+        import android.content.ClipData
+        import android.content.ClipboardManager
+        import android.content.Context
+        import android.content.Intent
+        import android.content.pm.ApplicationInfo
+        import android.content.pm.PackageManager
+        import android.graphics.Bitmap
+        import android.graphics.Canvas
+        import android.graphics.drawable.Drawable
+        import android.net.Uri
+        import android.os.Bundle
+        import android.provider.Settings
+        import android.widget.Toast
+        import androidx.appcompat.app.AppCompatActivity
+        import androidx.core.content.pm.ShortcutInfoCompat
+        import androidx.core.content.pm.ShortcutManagerCompat
+        import androidx.core.graphics.drawable.IconCompat
+        import androidx.recyclerview.widget.LinearLayoutManager
+        import androidx.recyclerview.widget.RecyclerView
+        import com.example.virtualapp.data.FakeIdentity
+        import com.example.virtualapp.data.IdentityStore
+        import com.google.android.material.floatingactionbutton.FloatingActionButton
+        import top.niunaijun.blackbox.BlackBoxCore
+
+        class MainActivity : AppCompatActivity() {
+
+            private val GMS_PACKAGES = listOf(
+                "com.google.android.gms",
+                "com.google.android.gsf",
+                "com.android.vending"
+            )
+
+            private val apps = mutableListOf<AppInfo>()
+            private lateinit var adapter: AppListAdapter
+
+            override fun onCreate(savedInstanceState: Bundle?) {
+                super.onCreate(savedInstanceState)
+                setContentView(R.layout.activity_main)
+
+                val rv = findViewById<RecyclerView>(R.id.appsRecyclerView)
+                adapter = AppListAdapter(
+                    apps,
+                    onClick = { app -> onAppClicked(app) },
+                    onLongClick = { app -> onAppLongClicked(app) }
+                )
+                rv.layoutManager = LinearLayoutManager(this)
+                rv.adapter = adapter
+
+                findViewById<FloatingActionButton>(R.id.fabAdd).setOnClickListener {
+                    loadApps()
+                    Toast.makeText(this, "लोड हो रहा है... कुल: ${apps.size}", Toast.LENGTH_SHORT).show()
+                }
+
+                IdentityStore.syncBridge(this)
+                loadApps()
+            }
+
+            private fun loadApps() {
+                apps.clear()
+                val pm = packageManager
+
+                val intent = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER)
+                val list = pm.queryIntentActivities(intent, 0)
+
+                for (ri in list) {
+                    val ai = ri.activityInfo.applicationInfo
+                    if (ai.packageName != packageName) {
+                        addApp(pm, ai)
+                    }
+                }
+
+                if (apps.isEmpty()) {
+                    val allApps = pm.getInstalledApplications(PackageManager.GET_META_DATA)
+                    for (ai in allApps) {
+                        if (ai.packageName != packageName &&
+                            pm.getLaunchIntentForPackage(ai.packageName) != null) {
+                            addApp(pm, ai)
+                        }
+                    }
+                }
+
+                apps.sortWith(compareByDescending<AppInfo> { it.isAdded }.thenBy { it.name.lowercase() })
+                adapter.notifyDataSetChanged()
+            }
+
+            private fun addApp(pm: PackageManager, ai: ApplicationInfo) {
+                val existing = IdentityStore.getAll(this)
+                    .find { it.packageName == ai.packageName }
+
+                apps.add(
+                    AppInfo(
+                        name = ai.loadLabel(pm).toString(),
+                        packageName = ai.packageName,
+                        icon = ai.loadIcon(pm),
+                        isAdded = existing != null,
+                        fakeAndroidId = existing?.androidId,
+                        copies = IdentityStore.copyCount(this, ai.packageName)
+                    )
+                )
+            }
+
+            // Tap → विकल्प की सूची
+            private fun onAppClicked(app: AppInfo) {
+                val identity = IdentityStore.getOrCreate(this, app.packageName)
+                app.isAdded = true
+                app.fakeAndroidId = identity.androidId
+                app.copies = IdentityStore.copyCount(this, app.packageName)
+                adapter.notifyDataSetChanged()
+
+                val options = arrayOf(
+                    "▶ वर्चुअल में चलाएँ",
+                    "➕ दूसरी कॉपी बनाएँ (नई ID के साथ)",
+                    "🏠 होम स्क्रीन पर जोड़ें",
+                    "🆔 Fake ID देखें",
+                    "🔍 यह ऐप क्या-क्या पढ़ता है",
+                    "🧩 Google Play Services जोड़ें (प्रयोग)",
+                    "⚙️ अनुमतियाँ दें (माइक, कैमरा, लोकेशन...)",
+                    "🧯 क्रैश का रिकॉर्ड देखें"
+                )
+                AlertDialog.Builder(this)
+                    .setTitle(app.name)
+                    .setItems(options) { _, which ->
+                        when (which) {
+                            0 -> pickCopy(app) { copy -> launchVirtual(app, copy) }
+                            1 -> createCopy(app)
+                            2 -> pickCopy(app) { copy -> addHomeShortcut(app, copy) }
+                            3 -> pickCopy(app) { copy -> showIdentityDialog(app, copy) }
+                            4 -> showInspect(app)
+                            5 -> chooseGmsSpace()
+                            6 -> startActivity(
+                                Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:$packageName"))
+                            )
+                            7 -> showCrashLog()
+                        }
+                    }
+                    .setNegativeButton("बंद करें", null)
+                    .show()
+            }
+
+            // एक से ज़्यादा कॉपी हों तो पूछो कौन-सी
+            private fun pickCopy(app: AppInfo, action: (Int) -> Unit) {
+                val n = IdentityStore.copyCount(this, app.packageName)
+                if (n <= 1) {
+                    action(0)
+                    return
+                }
+                val names = Array(n) { "कॉपी ${it + 1}" + if (IdentityStore.hasGms(this, it)) " · GMS ✔" else "" }
+                AlertDialog.Builder(this)
+                    .setTitle(app.name)
+                    .setItems(names) { _, which -> action(which) }
+                    .setNegativeButton("बंद करें", null)
+                    .show()
+            }
+
+            // इसी ऐप की एक और कॉपी: नया वर्चुअल स्पेस + नई ID
+            private fun createCopy(app: AppInfo) {
+                val copy = IdentityStore.addCopy(this, app.packageName)
+                app.copies = copy + 1
+                adapter.notifyDataSetChanged()
+                Toast.makeText(this, "कॉपी ${copy + 1} बनी, नई ID के साथ", Toast.LENGTH_SHORT).show()
+                launchVirtual(app, copy)
+            }
+
+            // होम स्क्रीन पर इस कॉपी का शॉर्टकट बनाओ (टैप करने पर सीधे वर्चुअल में खुलेगा)
+            private fun addHomeShortcut(app: AppInfo, copy: Int) {
+                if (!ShortcutManagerCompat.isRequestPinShortcutSupported(this)) {
+                    Toast.makeText(this, "यह फ़ोन का लॉन्चर शॉर्टकट नहीं बनाने देता", Toast.LENGTH_LONG).show()
+                    return
+                }
+                val launchIntent = Intent(this, LaunchActivity::class.java)
+                    .setAction(Intent.ACTION_VIEW)
+                    .putExtra(LaunchActivity.EXTRA_PKG, app.packageName)
+                    .putExtra(LaunchActivity.EXTRA_USER, copy)
+
+                val label = if (copy == 0) app.name else "${app.name} ${copy + 1}"
+                val info = ShortcutInfoCompat.Builder(this, "vapp_" + IdentityStore.key(app.packageName, copy))
+                    .setShortLabel(label)
+                    .setLongLabel(label)
+                    .setIcon(IconCompat.createWithBitmap(drawableToBitmap(app.icon)))
+                    .setIntent(launchIntent)
+                    .build()
+
+                val ok = ShortcutManagerCompat.requestPinShortcut(this, info, null)
+                Toast.makeText(
+                    this,
+                    if (ok) "होम स्क्रीन पर जोड़ने की अनुमति दें" else "शॉर्टकट नहीं बन पाया",
+                    Toast.LENGTH_LONG
+                ).show()
+            }
+
+            private fun drawableToBitmap(d: Drawable): Bitmap {
+                val size = 192
+                val bmp = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888)
+                val canvas = Canvas(bmp)
+                d.setBounds(0, 0, size, size)
+                d.draw(canvas)
+                return bmp
+            }
+
+            // Tap dialog: सारी fake info दिखाओ + Copy बटन
+            private fun showIdentityDialog(app: AppInfo, copy: Int) {
+                val id = IdentityStore.getOrCreate(this, IdentityStore.key(app.packageName, copy))
+                val message = """
+                    📱 ${app.name} (कॉपी ${copy + 1})
+
+                    ✅ वर्चुअल में चलाने पर लागू होती हैं:
+                    🆔 Android ID: ${id.androidId}
+                    📞 IMEI / Device ID / Subscriber ID: ${id.imei}
+                    📦 Model: ${id.model}
+                    🏢 Brand: ${id.brand}
+
+                    ⚠️ अभी लागू नहीं (सिर्फ़ बनी हुई):
+                    📶 WiFi MAC: ${id.wifiMac}
+                    🔵 Bluetooth MAC: ${id.bluetoothMac}
+                    🌐 WiFi IP: ${id.wifiIp}
+                    📡 Mobile IP: ${id.mobileIp}
+                    🔢 Serial: ${id.serial}
+                    🤖 Android Version: ${id.androidVersion}
+                """.trimIndent()
+
+                AlertDialog.Builder(this)
+                    .setTitle("Fake Identity")
+                    .setMessage(message)
+                    .setPositiveButton("Copy") { _, _ ->
+                        val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                        clipboard.setPrimaryClip(ClipData.newPlainText("FakeIdentity", message))
+                        Toast.makeText(this, "Copy हो गया", Toast.LENGTH_SHORT).show()
+                    }
+                    .setNegativeButton("बंद करें", null)
+                    .show()
+            }
+
+            // BlackBox के वर्चुअल स्पेस (कॉपी नंबर = यूज़र नंबर) में ऐप इंस्टॉल करके चलाओ
+            private fun launchVirtual(app: AppInfo, copy: Int) {
+                Toast.makeText(this, "वर्चुअल स्पेस में खोल रहे हैं...", Toast.LENGTH_SHORT).show()
+                Thread {
+                    try {
+                        val installed = BlackBoxCore.get().installPackageAsUser(app.packageName, copy)
+                        val launched = BlackBoxCore.get().launchApk(app.packageName, copy)
+                        runOnUiThread {
+                            Toast.makeText(
+                                this,
+                                "कॉपी ${copy + 1}: install=$installed, launch=$launched",
+                                Toast.LENGTH_LONG
+                            ).show()
+                        }
+                    } catch (e: Throwable) {
+                        val report = "${e.javaClass.name}: ${e.message}\n\n" +
+                            android.util.Log.getStackTraceString(e).take(1800)
+                        runOnUiThread { showErrorDialog(report) }
+                    }
+                }.start()
+            }
+
+            // ऐप कैसे पहचानता है: अनुमतियाँ, ट्रैकर SDK और वर्चुअल में माँगी गई जानकारी
+            private fun showInspect(app: AppInfo) {
+                val text = AppInspector.staticReport(this, app.packageName) + "\n" +
+                    AppInspector.dynamicReport(this, app.packageName)
+                AlertDialog.Builder(this)
+                    .setTitle("🔍 ${app.name}")
+                    .setMessage(text)
+                    .setPositiveButton("Copy") { _, _ ->
+                        val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                        clipboard.setPrimaryClip(ClipData.newPlainText("AppInspect", text))
+                        Toast.makeText(this, "Copy हो गया", Toast.LENGTH_SHORT).show()
+                    }
+                    .setNeutralButton("रिकॉर्ड साफ़ करें") { _, _ ->
+                        AppInspector.clearLog(this)
+                        Toast.makeText(this, "रिकॉर्ड साफ़ हो गया", Toast.LENGTH_SHORT).show()
+                    }
+                    .setNegativeButton("बंद करें", null)
+                    .show()
+            }
+
+            // वर्चुअल ऐप क्रैश हुए तो उनका कारण (आख़िरी हिस्सा)
+            private fun showCrashLog() {
+                val f = java.io.File(filesDir, MyApplication.CRASH_LOG)
+                val text = if (f.exists() && f.length() > 0) {
+                    val all = f.readText()
+                    if (all.length > 3500) "…" + all.takeLast(3500) else all
+                } else {
+                    "अभी कोई क्रैश रिकॉर्ड नहीं है। ऐप क्रैश हो, फिर दोबारा यहाँ देखें।"
+                }
+                AlertDialog.Builder(this)
+                    .setTitle("🧯 क्रैश का रिकॉर्ड")
+                    .setMessage(text)
+                    .setPositiveButton("Copy") { _, _ ->
+                        val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                        clipboard.setPrimaryClip(ClipData.newPlainText("CrashLog", text))
+                        Toast.makeText(this, "Copy हो गया", Toast.LENGTH_SHORT).show()
+                    }
+                    .setNeutralButton("साफ़ करें") { _, _ ->
+                        f.delete()
+                        Toast.makeText(this, "रिकॉर्ड साफ़ हो गया", Toast.LENGTH_SHORT).show()
+                    }
+                    .setNegativeButton("बंद करें", null)
+                    .show()
+            }
+
+            // किस वर्चुअल नंबर में Google Play Services जोड़नी है, चुनो
+            private fun chooseGmsSpace() {
+                val spaces = (apps.maxOfOrNull { it.copies } ?: 1).coerceAtLeast(1)
+                val names = Array(spaces) { i ->
+                    "वर्चुअल नंबर ${i + 1}" + if (IdentityStore.hasGms(this, i)) "  (GMS जुड़ा ✔)" else ""
+                }
+                AlertDialog.Builder(this)
+                    .setTitle("किस वर्चुअल में Google Play Services जोड़ें?")
+                    .setItems(names) { _, which -> confirmGms(which) }
+                    .setNegativeButton("बंद करें", null)
+                    .show()
+            }
+
+            private fun confirmGms(space: Int) {
+                AlertDialog.Builder(this)
+                    .setTitle("वर्चुअल नंबर ${space + 1}")
+                    .setMessage(
+                        "फ़ोन की Google Play Services, Services Framework और Play Store इस वर्चुअल नंबर में डालने की कोशिश होगी। " +
+                            "यह इस नंबर के सारे ऐप पर लागू होगा।\n\n" +
+                            "यह प्रयोग है, चलेगा या नहीं पक्का नहीं। अपना असली ज़रूरी Google खाता यहाँ न डालें।"
+                    )
+                    .setPositiveButton("जोड़ें") { _, _ -> addGms(space) }
+                    .setNegativeButton("रहने दें", null)
+                    .show()
+            }
+
+            private fun addGms(space: Int) {
+                Toast.makeText(this, "Google Play Services जोड़ रहे हैं...", Toast.LENGTH_SHORT).show()
+                Thread {
+                    val report = StringBuilder()
+                    var okCount = 0
+                    for (pkg in GMS_PACKAGES) {
+                        try {
+                            packageManager.getPackageInfo(pkg, 0)
+                            val r = BlackBoxCore.get().installPackageAsUser(pkg, space)
+                            val (ok, msg) = describeResult(r)
+                            when (ok) {
+                                true -> {
+                                    okCount++
+                                    report.append("✅ $pkg\n")
+                                }
+                                false -> report.append("❌ $pkg: $msg\n")
+                                null -> {
+                                    okCount++
+                                    report.append("❓ $pkg: नतीजा साफ़ नहीं ($msg)\n")
+                                }
+                            }
+                        } catch (e: PackageManager.NameNotFoundException) {
+                            report.append("➖ $pkg: फ़ोन में नहीं मिला\n")
+                        } catch (e: Throwable) {
+                            report.append("❌ $pkg: ${e.javaClass.simpleName}: ${e.message}\n")
+                        }
+                    }
+                    if (okCount > 0) IdentityStore.setGms(this, space, true)
+                    val text = report.toString()
+                    runOnUiThread {
+                        AlertDialog.Builder(this)
+                            .setTitle("वर्चुअल नंबर ${space + 1}: नतीजा")
+                            .setMessage(text)
+                            .setPositiveButton("Copy") { _, _ ->
+                                val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                                clipboard.setPrimaryClip(ClipData.newPlainText("GmsResult", text))
+                                Toast.makeText(this, "Copy हो गया", Toast.LENGTH_SHORT).show()
+                            }
+                            .setNegativeButton("बंद करें", null)
+                            .show()
+                        adapter.notifyDataSetChanged()
+                    }
+                }.start()
+            }
+
+            // InstallResult के अंदर success/msg खोजो (BlackBox का क्लास सीधे नहीं बाँधा)
+            private fun describeResult(r: Any?): Pair<Boolean?, String> {
+                if (r == null) return Pair(null, "")
+                return try {
+                    val ok = r.javaClass.getField("success").getBoolean(r)
+                    val msg = try {
+                        r.javaClass.getField("msg").get(r)?.toString() ?: ""
+                    } catch (e: Throwable) {
+                        ""
+                    }
+                    Pair(ok, msg)
+                } catch (e: Throwable) {
+                    Pair(null, r.toString())
+                }
+            }
+
+            // पूरा एरर दिखाओ + Copy बटन (मुझे भेजने के लिए)
+            private fun showErrorDialog(report: String) {
+                AlertDialog.Builder(this)
+                    .setTitle("वर्चुअल स्पेस एरर")
+                    .setMessage(report)
+                    .setPositiveButton("Copy") { _, _ ->
+                        val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                        clipboard.setPrimaryClip(ClipData.newPlainText("VirtualError", report))
+                        Toast.makeText(this, "Copy हो गया", Toast.LENGTH_SHORT).show()
+                    }
+                    .setNegativeButton("बंद करें", null)
+                    .show()
+            }
+
+            // Long-press → delete
+            private fun onAppLongClicked(app: AppInfo) {
+                if (!app.isAdded) {
+                    Toast.makeText(this, "इस ऐप की ID अभी बनी नहीं है", Toast.LENGTH_SHORT).show()
+                    return
+                }
+
+                AlertDialog.Builder(this)
+                    .setTitle("ID हटाएँ?")
+                    .setMessage("${app.name} की सारी कॉपियों की fake ID हटा दी जाएँगी।\nअगली बार नई ID बनेगी।")
+                    .setPositiveButton("हटाएँ") { _, _ ->
+                        IdentityStore.deleteAll(this, app.packageName)
+                        app.copies = 1
+                        app.isAdded = false
+                        app.fakeAndroidId = null
+                        adapter.notifyDataSetChanged()
+                        Toast.makeText(this, "ID हटा दी गई", Toast.LENGTH_SHORT).show()
+                    }
+                    .setNegativeButton("रहने दें", null)
+                    .show()
+            }
+        }
+        VAPP_EOF_5
+        mkdir -p "app/src/main/java/com/example/virtualapp"
+        cat > "app/src/main/java/com/example/virtualapp/MyApplication.kt" <<'VAPP_EOF_6'
+        package com.example.virtualapp
+
+        import android.app.Application
+        import android.content.Context
+        import android.os.Build
+        import android.util.Log
+        import android.webkit.WebView
+        import top.niunaijun.blackbox.BlackBoxCore
+        import top.niunaijun.blackbox.app.configuration.ClientConfiguration
+        import java.io.File
+
+        class MyApplication : Application() {
+
+            override fun attachBaseContext(base: Context) {
+                super.attachBaseContext(base)
+                try {
+                    BlackBoxCore.get().doAttachBaseContext(base, object : ClientConfiguration() {
+                        override fun getHostPackageName(): String = base.packageName
+                    })
+                } catch (e: Throwable) {
+                    Log.e("VirtualApp", "BlackBox attach fail: ${e.message}")
+                }
+            }
+
+            override fun onCreate() {
+                super.onCreate()
+                installCrashLogger()
+                fixWebViewForVirtualProcess()
+                try {
+                    BlackBoxCore.get().doCreate()
+                } catch (e: Throwable) {
+                    Log.e("VirtualApp", "BlackBox create fail: ${e.message}")
+                }
+                val virtualDir = File(filesDir, "virtual")
+                if (!virtualDir.exists()) virtualDir.mkdirs()
+                Log.d("VirtualApp", "Virtual dir ready: ${virtualDir.absolutePath}")
+            }
+
+            // हर वर्चुअल प्रोसेस (:p0, :p1...) का अपना WebView फ़ोल्डर, वरना विज्ञापन (WebView) चलाते ही क्रैश हो सकता है
+            private fun fixWebViewForVirtualProcess() {
+                if (Build.VERSION.SDK_INT < 28) return
+                try {
+                    val pn = Application.getProcessName() ?: return
+                    if (pn != packageName && pn.contains(":")) {
+                        WebView.setDataDirectorySuffix(pn.substringAfter(':'))
+                    }
+                } catch (e: Throwable) {
+                    Log.w("VirtualApp", "WebView suffix fail: ${e.message}")
+                }
+            }
+
+            // हर क्रैश का कारण files/crash.log में लिखो (ऐप के मेन्यू से देख सकते हैं)
+            private fun installCrashLogger() {
+                val previous = Thread.getDefaultUncaughtExceptionHandler()
+                Thread.setDefaultUncaughtExceptionHandler { thread, error ->
+                    try {
+                        val f = File(filesDir, CRASH_LOG)
+                        if (f.exists() && f.length() > 100_000) f.writeText("")
+                        val proc = if (Build.VERSION.SDK_INT >= 28) Application.getProcessName() else ""
+                        f.appendText(
+                            "=== ${System.currentTimeMillis()} | $proc | ${thread.name}\n" +
+                                Log.getStackTraceString(error).take(2500) + "\n\n"
+                        )
+                    } catch (e: Throwable) {
+                    }
+                    previous?.uncaughtException(thread, error)
+                }
+            }
+
+            companion object {
+                const val VIRTUAL_USER_ID = 0
+                const val CRASH_LOG = "crash.log"
+
+                fun copyApkToVirtual(context: Context, packageName: String): String? {
+                    return try {
+                        val src = context.packageManager
+                            .getApplicationInfo(packageName, 0).sourceDir
+                        val destDir = File(context.filesDir, "virtual/$packageName")
+                        if (!destDir.exists()) destDir.mkdirs()
+                        val dest = File(destDir, "base.apk")
+                        File(src).copyTo(dest, overwrite = true)
+                        dest.absolutePath
+                    } catch (e: Exception) {
+                        Log.e("VirtualApp", "APK copy fail: ${e.message}")
+                        null
+                    }
+                }
+            }
+        }
+        VAPP_EOF_6
+        mkdir -p "app/src/main/java/com/example/virtualapp/data"
+        cat > "app/src/main/java/com/example/virtualapp/data/FakeIdentity.kt" <<'VAPP_EOF_7'
+        package com.example.virtualapp.data
+
+        import android.content.Context
+        import android.util.Log
+        import java.io.File
+
+        data class FakeIdentity(
+            val packageName: String,
+            val androidId: String,
+            val imei: String,
+            val wifiMac: String,
+            val bluetoothMac: String,
+            val wifiIp: String,
+            val mobileIp: String,
+            val serial: String,
+            val model: String,
+            val brand: String,
+            val androidVersion: String,
+            val fingerprint: String
+        )
+
+        object IdentityStore {
+
+            private const val PREF = "fake_identity_store"
+
+            fun getOrCreate(context: Context, packageName: String): FakeIdentity {
+                val prefs = context.getSharedPreferences(PREF, Context.MODE_PRIVATE)
+                val existingId = prefs.getString("${packageName}_androidId", null)
+
+                if (existingId != null) {
+                    return FakeIdentity(
+                        packageName = packageName,
+                        androidId = existingId,
+                        imei = prefs.getString("${packageName}_imei", "")!!,
+                        wifiMac = prefs.getString("${packageName}_wifiMac", "")!!,
+                        bluetoothMac = prefs.getString("${packageName}_btMac", "")!!,
+                        wifiIp = prefs.getString("${packageName}_wifiIp", "")!!,
+                        mobileIp = prefs.getString("${packageName}_mobileIp", "")!!,
+                        serial = prefs.getString("${packageName}_serial", "")!!,
+                        model = prefs.getString("${packageName}_model", "")!!,
+                        brand = prefs.getString("${packageName}_brand", "")!!,
+                        androidVersion = prefs.getString("${packageName}_androidVer", "")!!,
+                        fingerprint = prefs.getString("${packageName}_fingerprint", "")!!
+                    )
+                }
+
+                // जो मॉडल दूसरी कॉपियों में पहले से लगे हैं, उन्हें छोड़कर नया चुनो
+                val usedModels = prefs.all.filterKeys { it.endsWith("_model") }.values.map { it.toString() }.toSet()
+                val freeDevices = DEVICES.filter { it.second !in usedModels }
+                val device = (if (freeDevices.isNotEmpty()) freeDevices else DEVICES).random()
+                val newIdentity = FakeIdentity(
+                    packageName = packageName,
+                    androidId = randomHex(16),
+                    imei = randomImei(),
+                    wifiMac = randomMac(),
+                    bluetoothMac = randomMac(),
+                    wifiIp = randomIp(),
+                    mobileIp = randomIp(),
+                    serial = randomHex(12).uppercase(),
+                    model = device.second,
+                    brand = device.first,
+                    androidVersion = "13",
+                    fingerprint = "${device.first.lowercase()}/${randomHex(6)}/${randomHex(6)}:13/TP1A.220624.014/${randomHex(8)}:user/release-keys"
+                )
+
+                prefs.edit()
+                    .putString("${packageName}_androidId", newIdentity.androidId)
+                    .putString("${packageName}_imei", newIdentity.imei)
+                    .putString("${packageName}_wifiMac", newIdentity.wifiMac)
+                    .putString("${packageName}_btMac", newIdentity.bluetoothMac)
+                    .putString("${packageName}_wifiIp", newIdentity.wifiIp)
+                    .putString("${packageName}_mobileIp", newIdentity.mobileIp)
+                    .putString("${packageName}_serial", newIdentity.serial)
+                    .putString("${packageName}_model", newIdentity.model)
+                    .putString("${packageName}_brand", newIdentity.brand)
+                    .putString("${packageName}_androidVer", newIdentity.androidVersion)
+                    .putString("${packageName}_fingerprint", newIdentity.fingerprint)
+                    .apply()
+
+                syncBridge(context)
+                return newIdentity
+            }
+
+            // BlackBox के वर्चुअल प्रोसेस इस फ़ाइल से हर ऐप की नकली ID पढ़ते हैं
+            // हर लाइन: पैकेज|androidId|imei
+            fun syncBridge(context: Context) {
+                try {
+                    val prefs = context.getSharedPreferences(PREF, Context.MODE_PRIVATE)
+                    val sb = StringBuilder()
+                    for (key in prefs.all.keys) {
+                        if (key.endsWith("_androidId")) {
+                            val pkg = key.removeSuffix("_androidId")
+                            val aid = prefs.getString(key, "") ?: ""
+                            val imei = prefs.getString("${pkg}_imei", "") ?: ""
+                            // कॉपी 0 की key सिर्फ़ पैकेज होती है, बाकी की पैकेज@नंबर
+                            val bridgeKey = if (pkg.contains('@')) pkg else "$pkg@0"
+                            val brand = (prefs.getString("${pkg}_brand", "") ?: "").replace("|", "/")
+                            val model = (prefs.getString("${pkg}_model", "") ?: "").replace("|", "/")
+                            val wifiIp = (prefs.getString("${pkg}_wifiIp", "") ?: "").replace("|", "/")
+                            if (aid.isNotEmpty() && imei.isNotEmpty()) {
+                                sb.append(bridgeKey).append('|').append(aid).append('|').append(imei)
+                                    .append('|').append(brand).append('|').append(model)
+                                    .append('|').append(wifiIp).append('\n')
+                            }
+                        }
+                    }
+                    File(context.filesDir, "fake_ids.txt").writeText(sb.toString())
+                } catch (e: Exception) {
+                    Log.e("IdentityStore", "bridge sync fail: ${e.message}")
+                }
+            }
+
+            // (ब्रांड, मॉडल) की असली-जैसी जोड़ियाँ, हर नई कॉपी में अलग ब्रांड आ सकता है
+            private val DEVICES = listOf(
+                "Samsung" to "SM-A546B",
+                "Samsung" to "SM-S918B",
+                "Samsung" to "SM-A346B",
+                "Samsung" to "SM-M336B",
+                "Samsung" to "SM-A536B",
+                "Samsung" to "SM-A736B",
+                "Samsung" to "SM-S911B",
+                "Samsung" to "SM-S908B",
+                "Samsung" to "SM-G991B",
+                "Samsung" to "SM-M546B",
+                "Xiaomi" to "23053RN02A",
+                "Xiaomi" to "M2101K6G",
+                "Xiaomi" to "2201117TI",
+                "Xiaomi" to "2201123G",
+                "Xiaomi" to "22081212UG",
+                "OPPO" to "CPH2387",
+                "OPPO" to "CPH2269",
+                "OPPO" to "CPH2557",
+                "OPPO" to "CPH2481",
+                "vivo" to "V2250",
+                "vivo" to "V2230",
+                "vivo" to "V2203",
+                "vivo" to "V2312",
+                "realme" to "RMX3511",
+                "realme" to "RMX3690",
+                "realme" to "RMX3085",
+                "realme" to "RMX3581",
+                "OnePlus" to "CPH2465",
+                "OnePlus" to "LE2111",
+                "motorola" to "moto g84 5G",
+                "Google" to "Pixel 7"
+            )
+
+            // कॉपी की key: कॉपी 0 = पैकेज, कॉपी N = पैकेज@N (N वर्चुअल यूज़र नंबर)
+            fun key(packageName: String, copy: Int): String =
+                if (copy == 0) packageName else "$packageName@$copy"
+
+            fun copyCount(context: Context, packageName: String): Int {
+                val prefs = context.getSharedPreferences(PREF, Context.MODE_PRIVATE)
+                return prefs.getInt("${packageName}__copies", 1).coerceAtLeast(1)
+            }
+
+            // नई कॉपी बनाओ (नई ID के साथ), नई कॉपी का नंबर लौटाओ
+            fun addCopy(context: Context, packageName: String): Int {
+                val n = copyCount(context, packageName)
+                getOrCreate(context, key(packageName, n))
+                context.getSharedPreferences(PREF, Context.MODE_PRIVATE)
+                    .edit().putInt("${packageName}__copies", n + 1).apply()
+                return n
+            }
+
+            // वर्चुअल नंबर में Google Play Services जोड़ी गई या नहीं
+            fun hasGms(context: Context, space: Int): Boolean =
+                context.getSharedPreferences(PREF, Context.MODE_PRIVATE).getBoolean("gms_space_$space", false)
+
+            fun setGms(context: Context, space: Int, value: Boolean) {
+                context.getSharedPreferences(PREF, Context.MODE_PRIVATE)
+                    .edit().putBoolean("gms_space_$space", value).apply()
+            }
+
+            // ऐप की सारी कॉपियों की ID हटाओ
+            fun deleteAll(context: Context, packageName: String) {
+                val n = copyCount(context, packageName)
+                for (i in 0 until n) delete(context, key(packageName, i))
+                context.getSharedPreferences(PREF, Context.MODE_PRIVATE)
+                    .edit().remove("${packageName}__copies").apply()
+            }
+
+            fun getAll(context: Context): List<FakeIdentity> {
+                val prefs = context.getSharedPreferences(PREF, Context.MODE_PRIVATE)
+                val result = mutableListOf<FakeIdentity>()
+                for (key in prefs.all.keys) {
+                    if (key.endsWith("_androidId")) {
+                        val pkg = key.removeSuffix("_androidId")
+                        result.add(getOrCreate(context, pkg))
+                    }
+                }
+                return result
+            }
+
+            fun delete(context: Context, packageName: String) {
+                val prefs = context.getSharedPreferences(PREF, Context.MODE_PRIVATE)
+                prefs.edit()
+                    .remove("${packageName}_androidId")
+                    .remove("${packageName}_imei")
+                    .remove("${packageName}_wifiMac")
+                    .remove("${packageName}_btMac")
+                    .remove("${packageName}_wifiIp")
+                    .remove("${packageName}_mobileIp")
+                    .remove("${packageName}_serial")
+                    .remove("${packageName}_model")
+                    .remove("${packageName}_brand")
+                    .remove("${packageName}_androidVer")
+                    .remove("${packageName}_fingerprint")
+                    .apply()
+                syncBridge(context)
+            }
+
+            private fun randomHex(len: Int): String {
+                val chars = "0123456789abcdef"
+                return (1..len).map { chars.random() }.joinToString("")
+            }
+
+            // 15 अंकों का IMEI जिसका Luhn चेक सही हो
+            private fun randomImei(): String {
+                val d = IntArray(14) { (0..9).random() }
+                d[0] = 3
+                d[1] = 5
+                var sum = 0
+                for (i in 0 until 14) {
+                    var x = d[i]
+                    if (i % 2 == 1) {
+                        x *= 2
+                        if (x > 9) x -= 9
+                    }
+                    sum += x
+                }
+                val check = (10 - sum % 10) % 10
+                return d.joinToString("") + check
+            }
+
+            private fun randomDigits(len: Int): String {
+                return (1..len).map { (0..9).random().toString() }.joinToString("")
+            }
+
+            private fun randomMac(): String {
+                val chars = "0123456789ABCDEF"
+                return (1..6).joinToString(":") {
+                    "${chars.random()}${chars.random()}"
+                }
+            }
+
+            private fun randomIp(): String {
+                return "${(1..223).random()}.${(0..255).random()}.${(0..255).random()}.${(1..254).random()}"
+            }
+        }
+        VAPP_EOF_7
+        mkdir -p "app/src/main/res/layout"
+        cat > "app/src/main/res/layout/activity_main.xml" <<'VAPP_EOF_8'
+        <?xml version="1.0" encoding="utf-8"?>
+        <androidx.coordinatorlayout.widget.CoordinatorLayout
+            xmlns:android="http://schemas.android.com/apk/res/android"
+            xmlns:app="http://schemas.android.com/apk/res-auto"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:background="#FFFFFF">
+
+            <androidx.recyclerview.widget.RecyclerView
+                android:id="@+id/appsRecyclerView"
+                android:layout_width="match_parent"
+                android:layout_height="match_parent"
+                android:padding="8dp"
+                android:clipToPadding="false"/>
+
+            <com.google.android.material.floatingactionbutton.FloatingActionButton
+                android:id="@+id/fabAdd"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_gravity="bottom|end"
+                android:layout_margin="20dp"
+                android:contentDescription="ऐप जोड़ें"
+                android:src="@android:drawable/ic_input_add"
+                app:tint="@android:color/white"
+                app:backgroundTint="#1E88E5"/>
+        </androidx.coordinatorlayout.widget.CoordinatorLayout>
+        VAPP_EOF_8
+        mkdir -p "app/src/main/res/layout"
+        cat > "app/src/main/res/layout/item_app.xml" <<'VAPP_EOF_9'
+        <?xml version="1.0" encoding="utf-8"?>
+        <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:padding="12dp"
+            android:gravity="center_vertical"
+            android:background="?android:attr/selectableItemBackground">
+
+            <ImageView
+                android:id="@+id/appIcon"
+                android:layout_width="48dp"
+                android:layout_height="48dp"/>
+
+            <LinearLayout
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:orientation="vertical"
+                android:layout_marginStart="12dp">
+
+                <TextView
+                    android:id="@+id/appName"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:textSize="16sp"
+                    android:textStyle="bold"
+                    android:textColor="#000000"/>
+
+                <TextView
+                    android:id="@+id/appPkg"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:textSize="12sp"
+                    android:textColor="#666666"/>
+
+                <TextView
+                    android:id="@+id/fakeIdText"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:textSize="11sp"
+                    android:textColor="#1E88E5"
+                    android:visibility="gone"
+                    android:layout_marginTop="2dp"/>
+            </LinearLayout>
+        </LinearLayout>
+        VAPP_EOF_9
+        mkdir -p "app/src/main/res/values"
+        cat > "app/src/main/res/values/strings.xml" <<'VAPP_EOF_10'
+        <resources>
+            <string name="app_name">VirtualApp</string>
+        </resources>
+        VAPP_EOF_10
+        mkdir -p "app/src/main/res/values"
+        cat > "app/src/main/res/values/themes.xml" <<'VAPP_EOF_11'
+        <resources>
+            <style name="Theme.VirtualApp" parent="Theme.Material3.DayNight.NoActionBar">
+                <item name="colorPrimary">#1E88E5</item>
+                <item name="colorOnPrimary">#FFFFFF</item>
+            </style>
+        </resources>
+        VAPP_EOF_11
+
+    - name: Put our app inside NewBlackbox
+      run: |
+        cd "$RUNNER_TEMP/bb"
+        echo "---- original app/build.gradle ----"
+        cat app/build.gradle
+        rm -rf app/src
+        mkdir -p app/src
+        cp -r "$RUNNER_TEMP/vapp/app/src/main" app/src/main
+        sed -i -E "s/(namespace[[:space:]]*=?[[:space:]]*)[\"'][^\"']+[\"']/\1'com.example.virtualapp'/" app/build.gradle
+        sed -i -E "s/(applicationId[[:space:]]*=?[[:space:]]*)[\"'][^\"']+[\"']/\1'com.example.virtualapp'/" app/build.gradle
+        printf '\ndependencies {\n    implementation "androidx.core:core-ktx:1.12.0"\n    implementation "androidx.appcompat:appcompat:1.6.1"\n    implementation "com.google.android.material:material:1.11.0"\n    implementation "androidx.recyclerview:recyclerview:1.3.2"\n}\n' >> app/build.gradle
+        echo "---- patched app/build.gradle ----"
+        cat app/build.gradle
+
+    - name: Build Debug APK
+      shell: bash
+      run: |
+        cd "$RUNNER_TEMP/bb"
+        chmod +x gradlew
+        ./gradlew :app:assembleDebug --stacktrace 2>&1 | tee "$RUNNER_TEMP/build.log"
+        mkdir -p "$GITHUB_WORKSPACE/out"
+        find app/build/outputs/apk/debug -name "*.apk" -exec cp {} "$GITHUB_WORKSPACE/out/app-debug.apk" \;
+        ls -la "$GITHUB_WORKSPACE/out"
+
+    - name: Show APK permissions and target SDK
+      if: success()
+      run: |
+        AAPT2=$(ls -d "$ANDROID_HOME"/build-tools/*/aapt2 | sort -V | tail -1)
+        echo "===== sdk versions ====="
+        "$AAPT2" dump badging "$GITHUB_WORKSPACE/out/app-debug.apk" | grep -E "^sdkVersion|^targetSdkVersion" || true
+        echo "===== permissions ====="
+        "$AAPT2" dump permissions "$GITHUB_WORKSPACE/out/app-debug.apk" | head -120 || true
+
+    - name: Show only the real errors
+      if: failure()
+      run: |
+        echo "=========== REAL ERRORS (यही भेजें) ==========="
+        grep -n -A4 " Error:" "$RUNNER_TEMP/build.log" | head -60 || true
+        echo "=========== MANIFEST MERGER REPORT ==========="
+        grep -n -B1 -A3 "ERROR" "$RUNNER_TEMP/bb/app/build/outputs/logs/manifest-merger-debug-report.txt" | head -60 || true
+        echo "=========== OUR MANIFEST ==========="
+        cat "$RUNNER_TEMP/bb/app/src/main/AndroidManifest.xml"
+
+    - name: Upload APK
+      uses: actions/upload-artifact@v4
+      with:
+        name: app-debug
+        path: out/app-debug.apk

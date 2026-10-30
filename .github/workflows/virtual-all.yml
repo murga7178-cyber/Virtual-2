@@ -59,6 +59,40 @@ jobs:
                 return read(currentKey(), 1);
             }
 
+            // इस कॉपी का नकली WiFi IP (bridge फ़ाइल का कॉलम 5)
+            public static String currentWifiIp() {
+                return read(currentKey(), 5);
+            }
+
+            // WifiInfo लौटते समय उसका IP नकली IP से बदलो (सिर्फ़ ऐप के अंदर)
+            public static Object fixWifiInfo(Object result) {
+                try {
+                    if (!(result instanceof android.net.wifi.WifiInfo)) return result;
+                    log("WIFI", "getConnectionInfo");
+                    String ip = currentWifiIp();
+                    if (ip == null || ip.isEmpty()) return result;
+                    java.net.InetAddress addr = java.net.InetAddress.getByName(ip);
+                    try {
+                        java.lang.reflect.Method m = android.net.wifi.WifiInfo.class
+                                .getDeclaredMethod("setInetAddress", java.net.InetAddress.class);
+                        m.setAccessible(true);
+                        m.invoke(result, addr);
+                    } catch (Throwable t1) {
+                        java.lang.reflect.Field f = android.net.wifi.WifiInfo.class.getDeclaredField("mIpAddress");
+                        f.setAccessible(true);
+                        if (f.getType() == int.class) {
+                            byte[] b = addr.getAddress();
+                            f.setInt(result, (b[0] & 0xff) | ((b[1] & 0xff) << 8) | ((b[2] & 0xff) << 16) | ((b[3] & 0xff) << 24));
+                        } else {
+                            f.set(result, addr);
+                        }
+                    }
+                    log("WIFI", "ip set " + ip);
+                } catch (Throwable ignored) {
+                }
+                return result;
+            }
+
             private static boolean sBuildApplied = false;
 
             // वर्चुअल ऐप शुरू होते ही Build.MODEL / BRAND / MANUFACTURER बदलो
@@ -212,6 +246,30 @@ jobs:
         if not os.path.exists(ba):
             found = glob.glob('../../**/BActivityThread.java', recursive=True)
             ba = found[0] if found else None
+        # 4) WiFi IP: हर binder call का नतीजा जाँचो, getConnectionInfo हो तो IP बदलो (best effort)
+        try:
+            cis = glob.glob('../../**/ClassInvocationStub.java', recursive=True)
+            if cis:
+                cp = cis[0]
+                cs = open(cp, encoding='utf-8').read()
+                repl2 = ('public Object invoke(Object proxy, Method method, Object[] args) throws Throwable {\n'
+                         '        Object vappResult = vappInvokeOrig(proxy, method, args);\n'
+                         '        if (method != null && "getConnectionInfo".equals(method.getName())) {\n'
+                         '            return top.niunaijun.blackbox.fake.service.FakeIds.fixWifiInfo(vappResult);\n'
+                         '        }\n'
+                         '        return vappResult;\n'
+                         '    }\n\n'
+                         '    private Object vappInvokeOrig(Object proxy, Method method, Object[] args) throws Throwable {')
+                cs2, cc = pat.subn(lambda m: repl2, cs, count=1)
+                if cc == 1:
+                    open(cp, 'w', encoding='utf-8').write(cs2)
+                    print('WIFI IP PATCH APPLIED in', cp)
+                else:
+                    print('WIFI IP PATCH SKIPPED: invoke() found', cc, 'in', cp)
+            else:
+                print('WIFI IP PATCH SKIPPED: ClassInvocationStub.java not found')
+        except Exception as e:
+            print('WIFI IP PATCH SKIPPED:', e)
         if ba:
             s = open(ba, encoding='utf-8').read()
             pat2 = re.compile(r'(void\s+handleBindApplication\s*\([^)]*\)\s*(?:throws\s+[\w\s,.]+)?\{)')
@@ -1144,7 +1202,10 @@ jobs:
                     )
                 }
 
-                val device = DEVICES.random()
+                // जो मॉडल दूसरी कॉपियों में पहले से लगे हैं, उन्हें छोड़कर नया चुनो
+                val usedModels = prefs.all.filterKeys { it.endsWith("_model") }.values.map { it.toString() }.toSet()
+                val freeDevices = DEVICES.filter { it.second !in usedModels }
+                val device = (if (freeDevices.isNotEmpty()) freeDevices else DEVICES).random()
                 val newIdentity = FakeIdentity(
                     packageName = packageName,
                     androidId = randomHex(16),
@@ -1193,9 +1254,11 @@ jobs:
                             val bridgeKey = if (pkg.contains('@')) pkg else "$pkg@0"
                             val brand = (prefs.getString("${pkg}_brand", "") ?: "").replace("|", "/")
                             val model = (prefs.getString("${pkg}_model", "") ?: "").replace("|", "/")
+                            val wifiIp = (prefs.getString("${pkg}_wifiIp", "") ?: "").replace("|", "/")
                             if (aid.isNotEmpty() && imei.isNotEmpty()) {
                                 sb.append(bridgeKey).append('|').append(aid).append('|').append(imei)
-                                    .append('|').append(brand).append('|').append(model).append('\n')
+                                    .append('|').append(brand).append('|').append(model)
+                                    .append('|').append(wifiIp).append('\n')
                             }
                         }
                     }
@@ -1211,16 +1274,31 @@ jobs:
                 "Samsung" to "SM-S918B",
                 "Samsung" to "SM-A346B",
                 "Samsung" to "SM-M336B",
+                "Samsung" to "SM-A536B",
+                "Samsung" to "SM-A736B",
+                "Samsung" to "SM-S911B",
+                "Samsung" to "SM-S908B",
+                "Samsung" to "SM-G991B",
+                "Samsung" to "SM-M546B",
                 "Xiaomi" to "23053RN02A",
                 "Xiaomi" to "M2101K6G",
                 "Xiaomi" to "2201117TI",
+                "Xiaomi" to "2201123G",
+                "Xiaomi" to "22081212UG",
                 "OPPO" to "CPH2387",
                 "OPPO" to "CPH2269",
+                "OPPO" to "CPH2557",
+                "OPPO" to "CPH2481",
                 "vivo" to "V2250",
                 "vivo" to "V2230",
+                "vivo" to "V2203",
+                "vivo" to "V2312",
                 "realme" to "RMX3511",
                 "realme" to "RMX3690",
+                "realme" to "RMX3085",
+                "realme" to "RMX3581",
                 "OnePlus" to "CPH2465",
+                "OnePlus" to "LE2111",
                 "motorola" to "moto g84 5G",
                 "Google" to "Pixel 7"
             )
