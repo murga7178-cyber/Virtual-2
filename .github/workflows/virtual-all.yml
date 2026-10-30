@@ -1354,6 +1354,7 @@ jobs:
             override fun onCreate() {
                 super.onCreate()
                 installCrashLogger()
+                installHangWatchdog()
                 fixWebViewForVirtualProcess()
                 try {
                     BlackBoxCore.get().doCreate()
@@ -1377,6 +1378,39 @@ jobs:
                     Log.w("VirtualApp", "WebView suffix fail: ${e.message}")
                 }
             }
+
+                    // हैंग (अटकना) पकड़ने के लिए: अगर मेन थ्रेड 5 सेकंड से ज़्यादा अटकी रहे तो सारी थ्रेड्स का हाल crash.log में लिख दो
+                    private fun installHangWatchdog() {
+                        try {
+                            val main = android.os.Handler(android.os.Looper.getMainLooper())
+                            val proc = if (Build.VERSION.SDK_INT >= 28) Application.getProcessName() else "main"
+                            val tick = java.util.concurrent.atomic.AtomicLong(System.currentTimeMillis())
+                            Thread({
+                                var lastDump = 0L
+                                while (true) {
+                                    try {
+                                        main.post { tick.set(System.currentTimeMillis()) }
+                                        Thread.sleep(1000)
+                                        val now = System.currentTimeMillis()
+                                        if (now - tick.get() > 5000 && now - lastDump > 20000) {
+                                            lastDump = now
+                                            val sb = StringBuilder("=== HANG $now | $proc | मेन थ्रेड 5 सेकंड से अटकी\n")
+                                            for ((t, st) in Thread.getAllStackTraces()) {
+                                                sb.append("--- ").append(t.name).append(" [").append(t.state).append("]\n")
+                                                for (e in st.take(25)) sb.append("    at ").append(e).append("\n")
+                                            }
+                                            val f = File(filesDir, CRASH_LOG)
+                                            if (f.exists() && f.length() > 100_000) f.writeText("")
+                                            f.appendText(sb.toString().take(12000) + "\n\n")
+                                        }
+                                    } catch (e: Throwable) {
+                                    }
+                                }
+                            }, "hang-watchdog").apply { isDaemon = true }.start()
+                        } catch (e: Throwable) {
+                            Log.w("VirtualApp", "watchdog fail: ${e.message}")
+                        }
+                    }
 
             // हर क्रैश का कारण files/crash.log में लिखो (ऐप के मेन्यू से देख सकते हैं)
             private fun installCrashLogger() {
