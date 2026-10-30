@@ -404,6 +404,25 @@ jobs:
         except Exception as e:
             print('START DROP PATCH SKIPPED:', e)
 
+        # 7) हर बार पैकेज डिस्क से लोड होने पर गायब स्क्रीन फिर से जोड़ो (दूसरी कॉपी बनने पर पहली कॉपी बिगड़ने से बचाव, best effort)
+        try:
+            stp = '../../core/system/pm/Settings.java'
+            if os.path.exists(stp):
+                st = open(stp, encoding='utf-8').read()
+                pat5 = re.compile(r'(bPackageSettings\.save\(\);)(\s*mPackages\.put\(bPackageSettings\.pkg\.packageName,\s*bPackageSettings\);)')
+                st2, stc = pat5.subn(lambda m: 'if (bPackageSettings.installOption.isFlag(InstallOption.FLAG_SYSTEM)) { top.niunaijun.blackbox.fake.service.FakeIds.addMissingActivities(bPackageSettings.pkg); }\n            ' + m.group(1) + m.group(2), st, count=1)
+                if stc == 1:
+                    open(stp, 'w', encoding='utf-8').write(st2)
+                    print('RELOAD ACTIVITIES PATCH APPLIED in', stp)
+                else:
+                    raise SystemExit('RELOAD ACTIVITIES PATCH FAILED: pattern found %d' % stc)
+            else:
+                raise SystemExit('RELOAD ACTIVITIES PATCH FAILED: Settings.java not found')
+        except SystemExit:
+            raise
+        except Exception as e:
+            print('RELOAD ACTIVITIES PATCH SKIPPED:', e)
+
         # 4) WiFi IP: हर binder call का नतीजा जाँचो, getConnectionInfo हो तो IP बदलो (best effort)
         try:
             cis = glob.glob('../../**/ClassInvocationStub.java', recursive=True)
