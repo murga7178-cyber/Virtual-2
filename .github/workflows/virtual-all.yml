@@ -125,6 +125,43 @@ jobs:
                 return false;
             }
 
+            // Split APK ऐप: मुख्य हिस्से के manifest में जो स्क्रीन नहीं हैं (दूसरे हिस्सों में हैं), उन्हें असली Android की सूची से जोड़ दो,
+            // ताकि वर्चुअल कॉपी उन्हें खुद पहचाने और असली Android के पास न भेजे।
+            public static void addMissingActivities(top.niunaijun.blackbox.core.system.pm.BPackage pkg) {
+                try {
+                    android.content.pm.PackageInfo real = BlackBoxCore.getPackageManager().getPackageInfo(
+                            pkg.packageName,
+                            android.content.pm.PackageManager.GET_ACTIVITIES | android.content.pm.PackageManager.GET_META_DATA);
+                    if (real == null || real.activities == null) return;
+                    java.util.HashSet<String> have = new java.util.HashSet<String>();
+                    for (top.niunaijun.blackbox.core.system.pm.BPackage.Activity a : pkg.activities) {
+                        have.add(a.className);
+                    }
+                    int added = 0;
+                    for (android.content.pm.ActivityInfo ai : real.activities) {
+                        if (ai == null || ai.name == null || have.contains(ai.name)) continue;
+                        android.os.Parcel parcel = android.os.Parcel.obtain();
+                        try {
+                            parcel.writeString(ai.name);
+                            parcel.writeBundle(ai.metaData);
+                            parcel.writeParcelable(ai, 0);
+                            parcel.writeInt(0);
+                            parcel.setDataPosition(0);
+                            top.niunaijun.blackbox.core.system.pm.BPackage.Activity act =
+                                    new top.niunaijun.blackbox.core.system.pm.BPackage.Activity(parcel);
+                            act.owner = pkg;
+                            pkg.activities.add(act);
+                            added++;
+                        } finally {
+                            parcel.recycle();
+                        }
+                    }
+                    android.util.Log.d("VAPP_SPLIT", pkg.packageName + ": added missing activities = " + added);
+                } catch (Throwable t) {
+                    android.util.Log.w("VAPP_SPLIT", "addMissingActivities failed: " + t);
+                }
+            }
+
             private static boolean sLocaleGuard = false;
 
             // Android 13+: ऐप जब सिस्टम से अपनी भाषा बदलने को कहता है तो SecurityException आती है और ऐप खुलते ही क्रैश होता है।
@@ -333,6 +370,23 @@ jobs:
         if not os.path.exists(ba):
             found = glob.glob('../../**/BActivityThread.java', recursive=True)
             ba = found[0] if found else None
+        # 6) Split APK ऐप की गायब स्क्रीन जोड़ो (best effort)
+        try:
+            sp = '../../core/system/pm/BPackageManagerService.java'
+            if os.path.exists(sp):
+                ss = open(sp, encoding='utf-8').read()
+                pat4 = re.compile(r'(BPackageSettings\s+bPackageSettings\s*=\s*mSettings\.getPackageLPw\(\s*aPackage\.packageName\s*,\s*aPackage\s*,\s*option\s*\)\s*;)')
+                ss2, sc = pat4.subn(lambda m: m.group(1) + '\n            if (option.isFlag(InstallOption.FLAG_SYSTEM)) { top.niunaijun.blackbox.fake.service.FakeIds.addMissingActivities(bPackageSettings.pkg); }', ss, count=1)
+                if sc == 1:
+                    open(sp, 'w', encoding='utf-8').write(ss2)
+                    print('SPLIT ACTIVITIES PATCH APPLIED in', sp)
+                else:
+                    print('SPLIT ACTIVITIES PATCH SKIPPED: pattern found', sc)
+            else:
+                print('SPLIT ACTIVITIES PATCH SKIPPED: file not found')
+        except Exception as e:
+            print('SPLIT ACTIVITIES PATCH SKIPPED:', e)
+
         # 5) अपनी स्क्रीन न मिले तो असली Android को देने की जगह छोड़ दो (क्रैश से बचाव, best effort)
         try:
             ap = 'ActivityManagerCommonProxy.java'
