@@ -95,8 +95,65 @@ jobs:
 
             private static boolean sBuildApplied = false;
 
+            private static boolean sLocaleGuard = false;
+
+            // Android 13+: ऐप जब सिस्टम से अपनी भाषा बदलने को कहता है तो SecurityException आती है और ऐप खुलते ही क्रैश होता है।
+            // "locale" सेवा का जवाब हम खुद देते हैं: भाषा सेट करने की माँग पर बस OK कह दो, बाकी असली सेवा से।
+            @SuppressWarnings("unchecked")
+            public static void installLocaleGuard() {
+                try {
+                    if (sLocaleGuard || android.os.Build.VERSION.SDK_INT < 33) return;
+                    sLocaleGuard = true;
+                    final Class<?> smClass = Class.forName("android.os.ServiceManager");
+                    final android.os.IBinder real = (android.os.IBinder) smClass
+                            .getMethod("getService", String.class).invoke(null, "locale");
+                    if (real == null) return;
+                    final Class<?> iface = Class.forName("android.app.ILocaleManager");
+                    final Class<?> stub = Class.forName("android.app.ILocaleManager$Stub");
+                    final Object realIface = stub.getMethod("asInterface", android.os.IBinder.class).invoke(null, real);
+                    final Object fake = java.lang.reflect.Proxy.newProxyInstance(
+                            iface.getClassLoader(), new Class<?>[]{iface},
+                            new java.lang.reflect.InvocationHandler() {
+                                public Object invoke(Object p, java.lang.reflect.Method m, Object[] a) throws Throwable {
+                                    String n = m.getName();
+                                    if ("setApplicationLocales".equals(n)) {
+                                        log("LOCALE", "set ignored");
+                                        return null;
+                                    }
+                                    if ("getApplicationLocales".equals(n)) {
+                                        return android.os.LocaleList.getEmptyLocaleList();
+                                    }
+                                    try {
+                                        return m.invoke(realIface, a);
+                                    } catch (java.lang.reflect.InvocationTargetException e) {
+                                        throw e.getCause();
+                                    }
+                                }
+                            });
+                    final android.os.IBinder wrapped = (android.os.IBinder) java.lang.reflect.Proxy.newProxyInstance(
+                            android.os.IBinder.class.getClassLoader(), new Class<?>[]{android.os.IBinder.class},
+                            new java.lang.reflect.InvocationHandler() {
+                                public Object invoke(Object p, java.lang.reflect.Method m, Object[] a) throws Throwable {
+                                    if ("queryLocalInterface".equals(m.getName())) return fake;
+                                    try {
+                                        return m.invoke(real, a);
+                                    } catch (java.lang.reflect.InvocationTargetException e) {
+                                        throw e.getCause();
+                                    }
+                                }
+                            });
+                    java.lang.reflect.Field f = smClass.getDeclaredField("sCache");
+                    f.setAccessible(true);
+                    ((java.util.Map<String, android.os.IBinder>) f.get(null)).put("locale", wrapped);
+                    log("LOCALE", "guard installed");
+                } catch (Throwable t) {
+                    log("LOCALE", "guard failed " + t);
+                }
+            }
+
             // वर्चुअल ऐप शुरू होते ही Build.MODEL / BRAND / MANUFACTURER बदलो
             public static void applyBuild() {
+                installLocaleGuard();
                 try {
                     if (sBuildApplied) return;
                     String[] row = readRow(currentKey());
