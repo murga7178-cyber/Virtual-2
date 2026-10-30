@@ -110,6 +110,21 @@ jobs:
                 }
             }
 
+            // वर्चुअल ऐप अपनी ही कोई स्क्रीन खोले और वो वर्चुअल कॉपी में न मिले, तो माँग असली Android को देने पर ऐप क्रैश हो जाता है।
+            // ऐसे में उस माँग को चुपचाप छोड़ दो (स्क्रीन नहीं खुलेगी, पर ऐप चलता रहेगा)।
+            public static boolean shouldDropStart(android.content.Intent intent) {
+                try {
+                    android.content.ComponentName comp = intent == null ? null : intent.getComponent();
+                    String pkg = BActivityThread.getAppPackageName();
+                    if (comp != null && pkg != null && pkg.equals(comp.getPackageName())) {
+                        log("START_DROPPED", comp.flattenToShortString());
+                        return true;
+                    }
+                } catch (Throwable ignored) {
+                }
+                return false;
+            }
+
             private static boolean sLocaleGuard = false;
 
             // Android 13+: ऐप जब सिस्टम से अपनी भाषा बदलने को कहता है तो SecurityException आती है और ऐप खुलते ही क्रैश होता है।
@@ -318,6 +333,23 @@ jobs:
         if not os.path.exists(ba):
             found = glob.glob('../../**/BActivityThread.java', recursive=True)
             ba = found[0] if found else None
+        # 5) अपनी स्क्रीन न मिले तो असली Android को देने की जगह छोड़ दो (क्रैश से बचाव, best effort)
+        try:
+            ap = 'ActivityManagerCommonProxy.java'
+            if os.path.exists(ap):
+                as_ = open(ap, encoding='utf-8').read()
+                pat3 = re.compile(r'(intent\.setPackage\(origPackage\);)(\s*)return method\.invoke\(who, args\);')
+                as2, ac = pat3.subn(lambda m: m.group(1) + '\n                    if (FakeIds.shouldDropStart(intent)) { return 0; }' + m.group(2) + 'return method.invoke(who, args);', as_, count=1)
+                if ac == 1:
+                    open(ap, 'w', encoding='utf-8').write(as2)
+                    print('START DROP PATCH APPLIED in', ap)
+                else:
+                    print('START DROP PATCH SKIPPED: pattern found', ac)
+            else:
+                print('START DROP PATCH SKIPPED: file not found')
+        except Exception as e:
+            print('START DROP PATCH SKIPPED:', e)
+
         # 4) WiFi IP: हर binder call का नतीजा जाँचो, getConnectionInfo हो तो IP बदलो (best effort)
         try:
             cis = glob.glob('../../**/ClassInvocationStub.java', recursive=True)
@@ -970,7 +1002,12 @@ jobs:
 
             // ऐप कैसे पहचानता है: अनुमतियाँ, ट्रैकर SDK और वर्चुअल में माँगी गई जानकारी
             private fun showInspect(app: AppInfo) {
-                val text = AppInspector.staticReport(this, app.packageName) + "\n" +
+                val splitInfo = try {
+                    val n = packageManager.getApplicationInfo(app.packageName, 0).splitSourceDirs?.size ?: 0
+                    if (n > 0) "⚠ यह ऐप Split APK है ($n हिस्से)। वर्चुअल में सिर्फ़ मुख्य हिस्सा जाता है, इसलिए कुछ स्क्रीन या फ़ीचर नहीं चल सकते।\n"
+                    else "Split APK: नहीं\n"
+                } catch (e: Exception) { "" }
+                val text = splitInfo + "\n" + AppInspector.staticReport(this, app.packageName) + "\n" +
                     AppInspector.dynamicReport(this, app.packageName)
                 AlertDialog.Builder(this)
                     .setTitle("🔍 ${app.name}")
