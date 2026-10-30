@@ -756,7 +756,8 @@ jobs:
                     "🔍 यह ऐप क्या-क्या पढ़ता है",
                     "🧩 Google Play Services जोड़ें (प्रयोग)",
                     "⚙️ अनुमतियाँ दें (माइक, कैमरा, लोकेशन...)",
-                    "🧯 क्रैश का रिकॉर्ड देखें"
+                    "🧯 क्रैश का रिकॉर्ड देखें",
+                    "📋 Logcat देखें / Copy करें (बंद होने की वजह)"
                 )
                 AlertDialog.Builder(this)
                     .setTitle(app.name)
@@ -772,6 +773,7 @@ jobs:
                                 Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:$packageName"))
                             )
                             7 -> showCrashLog()
+                            8 -> showLogcat()
                         }
                     }
                     .setNegativeButton("बंद करें", null)
@@ -936,6 +938,35 @@ jobs:
                     }
                     .setNegativeButton("बंद करें", null)
                     .show()
+            }
+
+            // ऐप का logcat पढ़कर दिखाओ (सिर्फ़ errors), Copy का बटन भी
+            private fun showLogcat() {
+                Toast.makeText(this, "लॉग पढ़ रहा हूँ…", Toast.LENGTH_SHORT).show()
+                Thread {
+                    val text = try {
+                        val p = Runtime.getRuntime().exec(
+                            arrayOf("logcat", "-d", "-v", "threadtime", "-t", "3000", "*:E", "AndroidRuntime:V")
+                        )
+                        val out = p.inputStream.bufferedReader().readText()
+                        if (out.isBlank()) "कोई error लाइन नहीं मिली।" else out
+                    } catch (e: Exception) {
+                        "logcat नहीं पढ़ पाया: " + e.message
+                    }
+                    runOnUiThread {
+                        val shown = if (text.length > 3500) "…" + text.takeLast(3500) else text
+                        AlertDialog.Builder(this)
+                            .setTitle("📋 Logcat (errors)")
+                            .setMessage(shown)
+                            .setPositiveButton("Copy") { _, _ ->
+                                val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                                clipboard.setPrimaryClip(ClipData.newPlainText("Logcat", text.takeLast(60000)))
+                                Toast.makeText(this, "Copy हो गया", Toast.LENGTH_SHORT).show()
+                            }
+                            .setNegativeButton("बंद करें", null)
+                            .show()
+                    }
+                }.start()
             }
 
             // किस वर्चुअल नंबर में Google Play Services जोड़नी है, चुनो
