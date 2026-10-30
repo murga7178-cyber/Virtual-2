@@ -95,6 +95,21 @@ jobs:
 
             private static boolean sBuildApplied = false;
 
+            // वर्चुअल ऐप (जैसे Google Play Services) जब "सब यूज़र्स" (-1) को broadcast भेजे तो सिस्टम मना कर देता है और वो क्रैश होता है।
+            // ऐसे में यूज़र नंबर -1 की जगह इस फ़ोन का असली यूज़र नंबर डाल दो।
+            public static void fixBroadcastUser(java.lang.reflect.Method m, Object[] args) {
+                try {
+                    if (m == null || args == null || args.length == 0) return;
+                    if (!m.getName().startsWith("broadcastIntent")) return;
+                    int last = args.length - 1;
+                    if (args[last] instanceof Integer && ((Integer) args[last]).intValue() == -1) {
+                        args[last] = Integer.valueOf(android.os.Process.myUid() / 100000);
+                        log("BROADCAST", "user ALL -> " + args[last]);
+                    }
+                } catch (Throwable ignored) {
+                }
+            }
+
             private static boolean sLocaleGuard = false;
 
             // Android 13+: ऐप जब सिस्टम से अपनी भाषा बदलने को कहता है तो SecurityException आती है और ऐप खुलते ही क्रैश होता है।
@@ -310,6 +325,7 @@ jobs:
                 cp = cis[0]
                 cs = open(cp, encoding='utf-8').read()
                 repl2 = ('public Object invoke(Object proxy, Method method, Object[] args) throws Throwable {\n'
+                         '        top.niunaijun.blackbox.fake.service.FakeIds.fixBroadcastUser(method, args);\n'
                          '        Object vappResult = vappInvokeOrig(proxy, method, args);\n'
                          '        if (method != null && "getConnectionInfo".equals(method.getName())) {\n'
                          '            return top.niunaijun.blackbox.fake.service.FakeIds.fixWifiInfo(vappResult);\n'
@@ -1637,3 +1653,18 @@ jobs:
       with:
         name: app-debug
         path: out/app-debug.apk
+
+    - name: Save BlackBox source for review
+      if: always()
+      run: |
+        mkdir -p "$GITHUB_WORKSPACE/src-out"
+        cd "$RUNNER_TEMP/bb/Bcore/src/main/java/top/niunaijun/blackbox"
+        zip -r -q "$GITHUB_WORKSPACE/src-out/blackbox-src.zip" .
+
+    - name: Upload BlackBox source
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: blackbox-src
+        path: src-out/blackbox-src.zip
+
