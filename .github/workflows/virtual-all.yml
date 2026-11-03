@@ -1015,24 +1015,89 @@ jobs:
                     .show()
             }
 
-            // एक से ज़्यादा कॉपी हों तो पूछो कौन-सी
+            // कॉपियाँ छोटे बॉक्स में: पहले ग्रुप (1–50, 51–100 ...), फिर उसके अंदर एक लाइन में 4 कॉपी
             private fun pickCopy(app: AppInfo, action: (Int) -> Unit) {
-                val live = IdentityStore.liveCopies(this, app.packageName)
+                val live = IdentityStore.liveCopies(this, app.packageName).sorted()
                 if (live.size <= 1) {
                     action(live.firstOrNull() ?: 0)
                     return
                 }
-                val names = Array(live.size) { "कॉपी ${live[it] + 1}" + if (IdentityStore.hasGms(this, live[it])) " · GMS ✔" else "" }
+                showGroupPage(app, live, action)
+            }
+
+            private fun dp(v: Int) = (v * resources.displayMetrics.density).toInt()
+
+            private fun makeBox(label: String, color: Int): android.widget.TextView {
+                val tv = android.widget.TextView(this)
+                tv.text = label
+                tv.textSize = 12f
+                tv.maxLines = 1
+                tv.gravity = android.view.Gravity.CENTER
+                tv.setTextColor(0xFFFFFFFF.toInt())
+                tv.setPadding(dp(2), dp(10), dp(2), dp(10))
+                val bg = android.graphics.drawable.GradientDrawable()
+                bg.setColor(color)
+                bg.cornerRadius = dp(8).toFloat()
+                tv.background = bg
+                val lp = android.widget.GridLayout.LayoutParams(
+                    android.widget.GridLayout.spec(android.widget.GridLayout.UNDEFINED),
+                    android.widget.GridLayout.spec(android.widget.GridLayout.UNDEFINED, 1f)
+                )
+                lp.width = 0
+                lp.setMargins(dp(4), dp(4), dp(4), dp(4))
+                tv.layoutParams = lp
+                return tv
+            }
+
+            private fun makeGridScroll(grid: android.widget.GridLayout): android.widget.ScrollView {
+                grid.columnCount = 4
+                grid.setPadding(dp(8), dp(8), dp(8), dp(8))
+                val sv = android.widget.ScrollView(this)
+                sv.addView(grid)
+                return sv
+            }
+
+            // ग्रुप के बॉक्स: 1–50, 51–100, 101–150 ... (एक लाइन में 4)
+            private fun showGroupPage(app: AppInfo, live: List<Int>, action: (Int) -> Unit) {
+                val grid = android.widget.GridLayout(this)
                 val dlg = AlertDialog.Builder(this)
-                    .setTitle("${app.name}  (हटाने के लिए कॉपी पर देर तक दबाएँ)")
-                    .setItems(names) { _, which -> action(live[which]) }
+                    .setTitle(app.name)
+                    .setView(makeGridScroll(grid))
+                    .setNegativeButton("बंद करें", null)
+                    .show()
+                for (g in live.map { it / 50 }.distinct().sorted()) {
+                    val label = "${g * 50 + 1}–${g * 50 + 50}"
+                    val box = makeBox(label, 0xFF43A047.toInt())
+                    box.setOnClickListener { showCopyPage(app, live, g, dlg, action) }
+                    grid.addView(box)
+                }
+            }
+
+            // एक पेज: एक लाइन में 4 कॉपी-बॉक्स (टैप = चलाओ, देर तक दबाओ = हटाओ)
+            private fun showCopyPage(
+                app: AppInfo, live: List<Int>, page: Int,
+                parent: AlertDialog?, action: (Int) -> Unit
+            ) {
+                val items = live.filter { it / 50 == page }
+                val grid = android.widget.GridLayout(this)
+                val dlg = AlertDialog.Builder(this)
+                    .setTitle("${app.name}  (${page * 50 + 1}–${page * 50 + 50})")
+                    .setView(makeGridScroll(grid))
                     .setNeutralButton("🗑 कॉपी हटाएँ") { _, _ -> onAppLongClicked(app) }
                     .setNegativeButton("बंद करें", null)
                     .show()
-                // किसी कॉपी पर होल्ड करो तो उसे हटाने के लिए हाँ/नहीं पूछो (टैप करने पर वो चलती है)
-                dlg.listView.setOnItemLongClickListener { _, _, pos, _ ->
-                    confirmDeleteCopy(app, live[pos]) { dlg.dismiss() }
-                    true
+                for (c in items) {
+                    val box = makeBox("कॉपी ${c + 1}", 0xFF1E88E5.toInt())
+                    box.setOnClickListener {
+                        dlg.dismiss()
+                        parent?.dismiss()
+                        action(c)
+                    }
+                    box.setOnLongClickListener {
+                        confirmDeleteCopy(app, c) { dlg.dismiss(); parent?.dismiss() }
+                        true
+                    }
+                    grid.addView(box)
                 }
             }
 
