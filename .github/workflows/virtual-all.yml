@@ -14,6 +14,10 @@ on:
         description: "टेस्ट: सिर्फ़ WiFi IP + broadcast वाला पैच (पैच 4) बंद"
         type: boolean
         default: false
+      skip_webview_fix:
+        description: "टेस्ट: MyApplication का WebView फ़ोल्डर वाला फ़िक्स बंद"
+        type: boolean
+        default: false
 
 jobs:
   build:
@@ -1993,6 +1997,13 @@ jobs:
         printf '\ndependencies {\n    implementation "androidx.core:core-ktx:1.12.0"\n    implementation "androidx.appcompat:appcompat:1.6.1"\n    implementation "com.google.android.material:material:1.11.0"\n    implementation "androidx.recyclerview:recyclerview:1.3.2"\n}\n' >> app/build.gradle
         echo "---- patched app/build.gradle ----"
         cat app/build.gradle
+
+    - name: Test - remove WebView data-dir fix
+      if: ${{ inputs.skip_webview_fix }}
+      run: |
+        F="$RUNNER_TEMP/bb/app/src/main/java/com/example/virtualapp/MyApplication.kt"
+        sed -i '/^ *fixWebViewForVirtualProcess()$/d' "$F"
+        grep -n "fixWebViewForVirtualProcess" "$F" || true
 
     - name: Use fixed signing key (ताकि नया APK पुराने के ऊपर अपडेट हो जाए)
       run: |
