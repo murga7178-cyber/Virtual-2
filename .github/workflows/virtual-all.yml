@@ -5,6 +5,15 @@ on:
   push:
     branches: [ "main" ]
   workflow_dispatch:
+    inputs:
+      skip_all_patches:
+        description: "टेस्ट: BlackBox के सारे पैच बंद (नेट चलता है या नहीं देखने के लिए)"
+        type: boolean
+        default: false
+      skip_net_patch:
+        description: "टेस्ट: सिर्फ़ WiFi IP + broadcast वाला पैच (पैच 4) बंद"
+        type: boolean
+        default: false
 
 jobs:
   build:
@@ -27,6 +36,9 @@ jobs:
         git clone --depth 1 https://github.com/ALEX5402/NewBlackbox.git "$RUNNER_TEMP/bb"
 
     - name: Patch BlackBox to use our fake IDs
+      if: ${{ !inputs.skip_all_patches }}
+      env:
+        SKIP_NET_PATCH: ${{ inputs.skip_net_patch }}
       run: |
         cd "$RUNNER_TEMP/bb/Bcore/src/main/java/top/niunaijun/blackbox/fake/service"
         cat > FakeIds.java <<'VAPP_JAVA_EOF'
@@ -474,7 +486,7 @@ jobs:
 
         # 4) WiFi IP: हर binder call का नतीजा जाँचो, getConnectionInfo हो तो IP बदलो (best effort)
         try:
-            cis = glob.glob('../../**/ClassInvocationStub.java', recursive=True)
+            cis = [] if os.environ.get('SKIP_NET_PATCH') == 'true' else glob.glob('../../**/ClassInvocationStub.java', recursive=True)
             if cis:
                 cp = cis[0]
                 cs = open(cp, encoding='utf-8').read()
