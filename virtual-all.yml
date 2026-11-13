@@ -1022,7 +1022,8 @@ jobs:
                     "🧩 Google Play Services जोड़ें (प्रयोग)",
                     "⚙️ अनुमतियाँ दें (माइक, कैमरा, लोकेशन...)",
                     "🧯 क्रैश का रिकॉर्ड देखें",
-                    "📋 Logcat देखें / Copy करें (बंद होने की वजह)"
+                    "📋 Logcat देखें / Copy करें (बंद होने की वजह)",
+                    "🌐 नेटवर्क जाँच का नतीजा (वर्चुअल के अंदर)"
                 )
                 AlertDialog.Builder(this)
                     .setTitle(app.name)
@@ -1039,6 +1040,7 @@ jobs:
                             )
                             7 -> showCrashLog()
                             8 -> showLogcat()
+                            9 -> showNetDiag()
                         }
                     }
                     .setNegativeButton("बंद करें", null)
@@ -1271,6 +1273,31 @@ jobs:
                     .setPositiveButton("Copy") { _, _ ->
                         val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
                         clipboard.setPrimaryClip(ClipData.newPlainText("CrashLog", text))
+                        Toast.makeText(this, "Copy हो गया", Toast.LENGTH_SHORT).show()
+                    }
+                    .setNeutralButton("साफ़ करें") { _, _ ->
+                        f.delete()
+                        Toast.makeText(this, "रिकॉर्ड साफ़ हो गया", Toast.LENGTH_SHORT).show()
+                    }
+                    .setNegativeButton("बंद करें", null)
+                    .show()
+            }
+
+            // वर्चुअल में चल रहे ऐप के अंदर से की गई नेटवर्क जाँच का नतीजा (files/netdiag.log)
+            private fun showNetDiag() {
+                val f = java.io.File(filesDir, "netdiag.log")
+                val text = if (f.exists() && f.length() > 0) {
+                    val all = f.readText()
+                    if (all.length > 3500) "…" + all.takeLast(3500) else all
+                } else {
+                    "अभी कोई नतीजा नहीं। किसी ऐप को वर्चुअल में चलाकर 15 सेकंड रुकें, फिर यहाँ देखें।"
+                }
+                AlertDialog.Builder(this)
+                    .setTitle("🌐 नेटवर्क जाँच")
+                    .setMessage(text)
+                    .setPositiveButton("Copy") { _, _ ->
+                        val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                        clipboard.setPrimaryClip(ClipData.newPlainText("NetDiag", text))
                         Toast.makeText(this, "Copy हो गया", Toast.LENGTH_SHORT).show()
                     }
                     .setNeutralButton("साफ़ करें") { _, _ ->
@@ -1523,6 +1550,7 @@ jobs:
                 installCrashLogger()
                 installHangWatchdog()
                 fixWebViewForVirtualProcess()
+                installNetSelfTest()
                 try {
                     BlackBoxCore.get().doCreate()
                 } catch (e: Throwable) {
@@ -1546,7 +1574,88 @@ jobs:
                 }
             }
 
-                    // हैंग (अटकना) पकड़ने के लिए: अगर मेन थ्रेड 5 सेकंड से ज़्यादा अटकी रहे तो सारी थ्रेड्स का हाल crash.log में लिख दो
+                    // वर्चुअल प्रोसेस (:p0, :p1...) के अंदर से नेटवर्क की जाँच; नतीजा files/netdiag.log में और छोटा संदेश स्क्रीन पर
+            private fun installNetSelfTest() {
+                try {
+                    val pn = if (Build.VERSION.SDK_INT >= 28) Application.getProcessName() else null
+                    if (pn == null || pn == packageName || !pn.contains(":")) return
+                    val app = this
+                    android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
+                        Thread {
+                            val sb = StringBuilder()
+                            val fmt = java.text.SimpleDateFormat("dd MMM HH:mm:ss", java.util.Locale.getDefault())
+                            sb.append("=== ").append(fmt.format(java.util.Date())).append(" | ").append(pn).append("\n")
+                            try {
+                                val c = Class.forName("top.niunaijun.blackbox.app.BActivityThread")
+                                sb.append("ऐप=").append(c.getMethod("getAppPackageName").invoke(null))
+                                    .append(" कॉपी=").append(c.getMethod("getUserId").invoke(null)).append("\n")
+                            } catch (e: Throwable) {
+                                sb.append("ऐप=?\n")
+                            }
+                            var summary = "NET TEST: "
+                            try {
+                                val granted = app.checkPermission(
+                                    android.Manifest.permission.INTERNET,
+                                    android.os.Process.myPid(), android.os.Process.myUid()
+                                ) == android.content.pm.PackageManager.PERMISSION_GRANTED
+                                sb.append("SDK ").append(Build.VERSION.SDK_INT)
+                                    .append(" uid ").append(android.os.Process.myUid())
+                                    .append(" INTERNET=").append(granted).append("\n")
+                            } catch (e: Throwable) {
+                                sb.append("perm ERR ").append(e).append("\n")
+                            }
+                            try {
+                                val cm = app.getSystemService(Context.CONNECTIVITY_SERVICE) as android.net.ConnectivityManager
+                                val n = cm.activeNetwork
+                                val c = if (n == null) null else cm.getNetworkCapabilities(n)
+                                sb.append("activeNet=").append(n != null)
+                                    .append(" inet=").append(c != null && c.hasCapability(12))
+                                    .append(" valid=").append(c != null && c.hasCapability(16)).append("\n")
+                            } catch (e: Throwable) {
+                                sb.append("cm ERR ").append(e.javaClass.simpleName).append(": ").append(e.message).append("\n")
+                            }
+                            try {
+                                val a = java.net.InetAddress.getByName("www.google.com")
+                                sb.append("DNS ok ").append(a.hostAddress).append("\n")
+                                summary += "DNS ok, "
+                            } catch (e: Throwable) {
+                                sb.append("DNS ERR ").append(e.javaClass.simpleName).append(": ").append(e.message).append("\n")
+                                summary += "DNS ERR, "
+                            }
+                            try {
+                                val u = java.net.URL("https://www.google.com/generate_204")
+                                val hc = u.openConnection() as java.net.HttpURLConnection
+                                hc.connectTimeout = 8000
+                                hc.readTimeout = 8000
+                                val code = hc.responseCode
+                                hc.disconnect()
+                                sb.append("HTTPS code ").append(code).append("\n")
+                                summary += "HTTPS $code"
+                            } catch (e: Throwable) {
+                                sb.append("HTTPS ERR ").append(e.javaClass.simpleName).append(": ").append(e.message).append("\n")
+                                summary += "HTTPS ERR " + e.javaClass.simpleName
+                            }
+                            try {
+                                val f = File(filesDir, "netdiag.log")
+                                if (f.exists() && f.length() > 50_000) f.writeText("")
+                                f.appendText(sb.toString() + "\n")
+                            } catch (e: Throwable) {
+                            }
+                            val msg = summary
+                            android.os.Handler(android.os.Looper.getMainLooper()).post {
+                                try {
+                                    android.widget.Toast.makeText(app, msg, android.widget.Toast.LENGTH_LONG).show()
+                                } catch (e: Throwable) {
+                                }
+                            }
+                        }.start()
+                    }, 10000)
+                } catch (e: Throwable) {
+                    Log.w("VirtualApp", "net self test fail: ${e.message}")
+                }
+            }
+
+            // हैंग (अटकना) पकड़ने के लिए: अगर मेन थ्रेड 5 सेकंड से ज़्यादा अटकी रहे तो सारी थ्रेड्स का हाल crash.log में लिख दो
                     private fun installHangWatchdog() {
                         try {
                             val main = android.os.Handler(android.os.Looper.getMainLooper())
