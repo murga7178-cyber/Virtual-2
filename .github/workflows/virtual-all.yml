@@ -1652,6 +1652,7 @@ jobs:
                 } catch (e: Throwable) {
                     Log.e("VirtualApp", "BlackBox attach fail: ${e.message}")
                 }
+                flushPermissionCache()
             }
 
             override fun onCreate() {
@@ -1668,6 +1669,58 @@ jobs:
                 val virtualDir = File(filesDir, "virtual")
                 if (!virtualDir.exists()) virtualDir.mkdirs()
                 Log.d("VirtualApp", "Virtual dir ready: ${virtualDir.absolutePath}")
+            }
+
+            private var permFlushResult = "not run"
+
+            // Android 16: PermissionManager का cache पुराना "नहीं" (INTERNET=false) याद रख लेता है; उसे बंद/खाली करो
+            private fun flushPermissionCache() {
+                val sb = StringBuilder()
+                try {
+                    val pm = Class.forName("android.permission.PermissionManager")
+                    try {
+                        val m = pm.getDeclaredMethod("disablePermissionCache")
+                        m.isAccessible = true
+                        m.invoke(null)
+                        sb.append("disable=ok ")
+                    } catch (e: Throwable) {
+                        sb.append("disable=").append(e.javaClass.simpleName).append(" ")
+                    }
+                    try {
+                        val f = pm.getDeclaredField("sPermissionCache")
+                        f.isAccessible = true
+                        val cache = f.get(null)
+                        if (cache == null) {
+                            sb.append("cache=null ")
+                        } else {
+                            for (name in arrayOf("disableLocal", "clear")) {
+                                var done = false
+                                var c: Class<*>? = cache.javaClass
+                                while (!done) {
+                                    val cur = c ?: break
+                                    try {
+                                        val m = cur.getDeclaredMethod(name)
+                                        m.isAccessible = true
+                                        m.invoke(cache)
+                                        sb.append(name).append("=ok ")
+                                        done = true
+                                    } catch (e: NoSuchMethodException) {
+                                        c = cur.superclass
+                                    } catch (e: Throwable) {
+                                        sb.append(name).append("=").append(e.javaClass.simpleName).append(" ")
+                                        done = true
+                                    }
+                                }
+                                if (!done) sb.append(name).append("=none ")
+                            }
+                        }
+                    } catch (e: Throwable) {
+                        sb.append("field=").append(e.javaClass.simpleName).append(" ")
+                    }
+                } catch (e: Throwable) {
+                    sb.append("PermissionManager=").append(e.javaClass.simpleName)
+                }
+                permFlushResult = sb.toString()
             }
 
             // हर वर्चुअल प्रोसेस (:p0, :p1...) का अपना WebView फ़ोल्डर, वरना विज्ञापन (WebView) चलाते ही क्रैश हो सकता है
@@ -1738,6 +1791,9 @@ jobs:
                                 }
                                 sb.append("perm self=").append(selfOk).append(" pm=").append(pmOk)
                                     .append(" am=").append(amRes).append("\n")
+                                flushPermissionCache()
+                                val afterOk = app.checkPermission(ip, android.os.Process.myPid(), android.os.Process.myUid()) == ok
+                                sb.append("flush: ").append(permFlushResult).append("| afterFlush=").append(afterOk).append("\n")
                             } catch (e: Throwable) {
                                 sb.append("perm2 ERR ").append(e).append("\n")
                             }
