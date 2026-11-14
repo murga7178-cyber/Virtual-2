@@ -43,15 +43,63 @@ jobs:
       run: |
         git clone --depth 1 https://github.com/ALEX5402/NewBlackbox.git "$RUNNER_TEMP/bb"
 
-    - name: Disable BlackBox fake network hooks (वर्चुअल ऐप असली नेटवर्क इस्तेमाल करें)
+    - name: Fix BlackBox network (नकली नेटवर्क हुक हटाओ, असली नेटवर्क + सही पैकेज नाम)
       if: ${{ !inputs.keep_net_hooks }}
       run: |
-        F="$RUNNER_TEMP/bb/Bcore/src/main/java/top/niunaijun/blackbox/fake/hook/HookManager.java"
+        BB="$RUNNER_TEMP/bb/Bcore/src/main/java/top/niunaijun/blackbox"
+        HM="$BB/fake/hook/HookManager.java"
         echo "---- before ----"
-        grep -n "IConnectivityManagerProxy\|IDnsResolverProxy" "$F"
-        sed -i '/addInjector(new IConnectivityManagerProxy());/d;/addInjector(new IDnsResolverProxy());/d' "$F"
+        grep -n "IConnectivityManagerProxy\|IDnsResolverProxy" "$HM"
+
+        # 1) सीधा (passthrough) connectivity proxy: असली नतीजे लौटाता है, बस ऐप का पैकेज नाम होस्ट के नाम से बदल देता है
+        cat > "$BB/fake/service/ConnectivityPassthroughProxy.java" <<'CPP_EOF'
+        package top.niunaijun.blackbox.fake.service;
+
+        import android.content.Context;
+        import java.lang.reflect.Method;
+        import black.android.net.BRIConnectivityManagerStub;
+        import black.android.os.BRServiceManager;
+        import top.niunaijun.blackbox.fake.hook.BinderInvocationStub;
+        import top.niunaijun.blackbox.utils.MethodParameterUtils;
+
+        public class ConnectivityPassthroughProxy extends BinderInvocationStub {
+            public ConnectivityPassthroughProxy() {
+                super(BRServiceManager.get().getService(Context.CONNECTIVITY_SERVICE));
+            }
+
+            @Override
+            protected Object getWho() {
+                return BRIConnectivityManagerStub.get().asInterface(BRServiceManager.get().getService(Context.CONNECTIVITY_SERVICE));
+            }
+
+            @Override
+            protected void inject(Object baseInvocation, Object proxyInvocation) {
+                replaceSystemService(Context.CONNECTIVITY_SERVICE);
+            }
+
+            @Override
+            public boolean isBadEnv() {
+                return false;
+            }
+
+            @Override
+            public Object invoke(Object proxy, Method method, Object[] args) throws Throwable {
+                MethodParameterUtils.replaceAllAppPkg(args);
+                return super.invoke(proxy, method, args);
+            }
+        }
+        CPP_EOF
+
+        # 2) पुराना नकली connectivity proxy बदलो और नकली DNS proxy हटाओ
+        sed -i 's/addInjector(new IConnectivityManagerProxy());/addInjector(new ConnectivityPassthroughProxy());/' "$HM"
+        sed -i 's/^import top.niunaijun.blackbox.fake.service.IConnectivityManagerProxy;/&\nimport top.niunaijun.blackbox.fake.service.ConnectivityPassthroughProxy;/' "$HM"
+        sed -i '/addInjector(new IDnsResolverProxy());/d' "$HM"
+
         echo "---- after ----"
-        grep -n "addInjector(new IConnectivityManagerProxy\|addInjector(new IDnsResolverProxy" "$F" && { echo "HOOK REMOVE FAILED"; exit 1; } || echo "network hooks removed"
+        grep -n "ConnectivityPassthroughProxy\|IConnectivityManagerProxy\|IDnsResolverProxy" "$HM"
+        grep -q "addInjector(new ConnectivityPassthroughProxy());" "$HM" || { echo "HOOK REPLACE FAILED"; exit 1; }
+        grep -q "^import top.niunaijun.blackbox.fake.service.ConnectivityPassthroughProxy;" "$HM" || { echo "IMPORT ADD FAILED"; exit 1; }
+        if grep -q "addInjector(new IDnsResolverProxy" "$HM"; then echo "DNS HOOK REMOVE FAILED"; exit 1; fi
 
     - name: Patch BlackBox to use our fake IDs
       if: ${{ !inputs.skip_all_patches }}
