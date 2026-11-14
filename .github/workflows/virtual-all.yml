@@ -112,6 +112,57 @@ jobs:
                 s = s.replace(old2, old2 + add)
             open(p, 'w', encoding='utf-8').write(s)
             print('patched', fn)
+
+        # Android 16: Context.checkPermission अब uid वाले रास्ते (checkUidPermission) से जाता है; उसे भी INTERNET के लिए "मिली" कहो
+        hook_src = (
+            'package top.niunaijun.blackbox.fake.service;\n'
+            '\n'
+            'import java.lang.reflect.Method;\n'
+            'import top.niunaijun.blackbox.fake.hook.MethodHook;\n'
+            '\n'
+            'public class NetPermHook extends MethodHook {\n'
+            '    private final String mName;\n'
+            '\n'
+            '    public NetPermHook(String name) {\n'
+            '        mName = name;\n'
+            '    }\n'
+            '\n'
+            '    @Override\n'
+            '    protected String getMethodName() {\n'
+            '        return mName;\n'
+            '    }\n'
+            '\n'
+            '    @Override\n'
+            '    protected Object hook(Object who, Method method, Object[] args) throws Throwable {\n'
+            '        if (args != null) {\n'
+            '            for (Object a : args) {\n'
+            '                if (a instanceof String) {\n'
+            '                    String p = (String) a;\n'
+            '                    if (p.equals("android.permission.INTERNET") || p.equals("android.permission.ACCESS_NETWORK_STATE")) {\n'
+            '                        return Integer.valueOf(0);\n'
+            '                    }\n'
+            '                }\n'
+            '            }\n'
+            '        }\n'
+            '        return method.invoke(who, args);\n'
+            '    }\n'
+            '}\n')
+        open(base + 'NetPermHook.java', 'w', encoding='utf-8').write(hook_src)
+
+        p = base + 'IPackageManagerProxy.java'
+        s = open(p, encoding='utf-8').read()
+        a = '        addMethodHook(new SimpleAudioPermissionHook());\n'
+        assert s.count(a) == 1, 'PM anchor'
+        s = s.replace(a, a + '        addMethodHook(new NetPermHook("checkUidPermission"));\n')
+        open(p, 'w', encoding='utf-8').write(s)
+
+        p = base + 'IPermissionManagerProxy.java'
+        s = open(p, encoding='utf-8').read()
+        a = '        addMethodHook(new PkgMethodProxy("shouldShowRequestPermissionRationale"));\n'
+        assert s.count(a) == 1, 'PermMgr anchor'
+        s = s.replace(a, a + '        addMethodHook(new NetPermHook("checkUidPermission"));\n        addMethodHook(new NetPermHook("checkPermission"));\n')
+        open(p, 'w', encoding='utf-8').write(s)
+        print('net perm hooks added')
         PERM_EOF
 
     - name: Patch BlackBox to use our fake IDs
