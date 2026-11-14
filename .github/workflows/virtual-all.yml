@@ -1642,7 +1642,7 @@ jobs:
                         Thread {
                             val sb = StringBuilder()
                             val fmt = java.text.SimpleDateFormat("dd MMM HH:mm:ss", java.util.Locale.getDefault())
-                            sb.append("=== ").append(fmt.format(java.util.Date())).append(" | ").append(pn).append("\n")
+                            sb.append("[run ${{ github.run_number }}] === ").append(fmt.format(java.util.Date())).append(" | ").append(pn).append("\n")
                             try {
                                 val c = Class.forName("top.niunaijun.blackbox.app.BActivityThread")
                                 sb.append("ऐप=").append(c.getMethod("getAppPackageName").invoke(null))
@@ -1661,6 +1661,34 @@ jobs:
                                     .append(" INTERNET=").append(granted).append("\n")
                             } catch (e: Throwable) {
                                 sb.append("perm ERR ").append(e).append("\n")
+                            }
+                            try {
+                                val ip = android.Manifest.permission.INTERNET
+                                val ok = android.content.pm.PackageManager.PERMISSION_GRANTED
+                                val selfOk = app.checkSelfPermission(ip) == ok
+                                var gpkg = packageName
+                                try {
+                                    val bc = Class.forName("top.niunaijun.blackbox.app.BActivityThread")
+                                    gpkg = bc.getMethod("getAppPackageName").invoke(null) as String
+                                } catch (e: Throwable) {
+                                }
+                                val pmOk = app.packageManager.checkPermission(ip, gpkg) == ok
+                                var amRes = "?"
+                                try {
+                                    val amc = Class.forName("android.app.ActivityManager")
+                                    val svc = amc.getMethod("getService").invoke(null)
+                                    val r = svc.javaClass.getMethod(
+                                        "checkPermission", String::class.java,
+                                        Int::class.javaPrimitiveType, Int::class.javaPrimitiveType
+                                    ).invoke(svc, ip, android.os.Process.myPid(), android.os.Process.myUid()) as Int
+                                    amRes = (r == 0).toString()
+                                } catch (e: Throwable) {
+                                    amRes = "ERR " + e.javaClass.simpleName
+                                }
+                                sb.append("perm self=").append(selfOk).append(" pm=").append(pmOk)
+                                    .append(" am=").append(amRes).append("\n")
+                            } catch (e: Throwable) {
+                                sb.append("perm2 ERR ").append(e).append("\n")
                             }
                             try {
                                 val cm = app.getSystemService(Context.CONNECTIVITY_SERVICE) as android.net.ConnectivityManager
