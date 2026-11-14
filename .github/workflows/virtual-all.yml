@@ -163,6 +163,15 @@ jobs:
         s = s.replace(a, a + '        addMethodHook(new NetPermHook("checkUidPermission"));\n        addMethodHook(new NetPermHook("checkPermission"));\n')
         open(p, 'w', encoding='utf-8').write(s)
         print('net perm hooks added')
+
+        # आख़िरी सीधा इलाज: वर्चुअल ऐप को नकली uid की जगह होस्ट का असली uid दिखाओ (अनुमति जाँच हर रास्ते पर इसी uid से होती है)
+        ncp = os.environ['RUNNER_TEMP'] + '/bb/Bcore/src/main/java/top/niunaijun/blackbox/core/NativeCore.java'
+        s = open(ncp, encoding='utf-8').read()
+        a = 'if (origCallingUid == BlackBoxCore.getHostUid()) {'
+        assert s.count(a) == 1, 'NativeCore anchor'
+        s = s.replace(a, a + '\n                if (true) return origCallingUid;')
+        open(ncp, 'w', encoding='utf-8').write(s)
+        print('uid spoof disabled')
         PERM_EOF
 
     - name: Patch BlackBox to use our fake IDs
