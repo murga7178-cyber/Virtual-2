@@ -101,6 +101,38 @@ jobs:
         grep -q "^import top.niunaijun.blackbox.fake.service.ConnectivityPassthroughProxy;" "$HM" || { echo "IMPORT ADD FAILED"; exit 1; }
         if grep -q "addInjector(new IDnsResolverProxy" "$HM"; then echo "DNS HOOK REMOVE FAILED"; exit 1; fi
 
+    - name: Fix BlackBox INTERNET permission check (वर्चुअल ऐप को INTERNET अनुमति मिली हुई दिखे)
+      if: ${{ !inputs.keep_net_hooks }}
+      run: |
+        python3 - <<'PERM_EOF'
+        import os
+        base = os.environ['RUNNER_TEMP'] + '/bb/Bcore/src/main/java/top/niunaijun/blackbox/fake/service/'
+        net = 'if (permission.equals("android.permission.INTERNET") || permission.equals("android.permission.ACCESS_NETWORK_STATE")) return true;'
+        for fn in ['IPackageManagerProxy.java', 'IActivityManagerProxy.java']:
+            p = base + fn
+            s = open(p, encoding='utf-8').read()
+            old = 'private static boolean isAudioPermission(String permission) {\n        if (permission == null) return false;\n'
+            assert s.count(old) == 1, 'isAudioPermission not found in ' + fn
+            s = s.replace(old, old + '        ' + net + '\n')
+            if fn == 'IActivityManagerProxy.java':
+                old2 = ('    @ProxyMethod("checkPermission")\n'
+                        '    public static class checkPermission extends MethodHook {\n'
+                        '        @Override\n'
+                        '        protected Object hook(Object who, Method method, Object[] args) throws Throwable {\n'
+                        '            MethodParameterUtils.replaceLastUid(args);\n')
+                assert s.count(old2) == 1, 'checkPermission hook not found'
+                add = ('            try {\n'
+                       '                if (args != null && args.length >= 3 && args[1] instanceof Integer && args[2] instanceof Integer\n'
+                       '                        && ((Integer) args[1]).intValue() == android.os.Process.myPid()) {\n'
+                       '                    args[2] = Integer.valueOf(BlackBoxCore.getHostUid());\n'
+                       '                }\n'
+                       '            } catch (Throwable ignored) {\n'
+                       '            }\n')
+                s = s.replace(old2, old2 + add)
+            open(p, 'w', encoding='utf-8').write(s)
+            print('patched', fn)
+        PERM_EOF
+
     - name: Patch BlackBox to use our fake IDs
       if: ${{ !inputs.skip_all_patches }}
       env:
