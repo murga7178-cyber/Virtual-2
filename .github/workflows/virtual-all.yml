@@ -5,23 +5,6 @@ on:
   push:
     branches: [ "main" ]
   workflow_dispatch:
-    inputs:
-      skip_all_patches:
-        description: "टेस्ट: BlackBox के सारे पैच बंद (नेट चलता है या नहीं देखने के लिए)"
-        type: boolean
-        default: false
-      skip_net_patch:
-        description: "टेस्ट: सिर्फ़ WiFi IP + broadcast वाला पैच (पैच 4) बंद"
-        type: boolean
-        default: false
-      skip_webview_fix:
-        description: "टेस्ट: MyApplication का WebView फ़ोल्डर वाला फ़िक्स बंद"
-        type: boolean
-        default: false
-      keep_net_hooks:
-        description: "टेस्ट: BlackBox के नकली नेटवर्क हुक वापस रखो (आम तौर पर टिक न करें)"
-        type: boolean
-        default: false
 
 jobs:
   build:
@@ -44,7 +27,6 @@ jobs:
         git clone --depth 1 https://github.com/ALEX5402/NewBlackbox.git "$RUNNER_TEMP/bb"
 
     - name: Fix BlackBox network (नकली नेटवर्क हुक हटाओ, असली नेटवर्क + सही पैकेज नाम)
-      if: ${{ !inputs.keep_net_hooks }}
       run: |
         BB="$RUNNER_TEMP/bb/Bcore/src/main/java/top/niunaijun/blackbox"
         HM="$BB/fake/hook/HookManager.java"
@@ -102,7 +84,6 @@ jobs:
         if grep -q "addInjector(new IDnsResolverProxy" "$HM"; then echo "DNS HOOK REMOVE FAILED"; exit 1; fi
 
     - name: Fix BlackBox INTERNET permission check (वर्चुअल ऐप को INTERNET अनुमति मिली हुई दिखे)
-      if: ${{ !inputs.keep_net_hooks }}
       run: |
         python3 - <<'PERM_EOF'
         import os
@@ -134,9 +115,6 @@ jobs:
         PERM_EOF
 
     - name: Patch BlackBox to use our fake IDs
-      if: ${{ !inputs.skip_all_patches }}
-      env:
-        SKIP_NET_PATCH: ${{ inputs.skip_net_patch }}
       run: |
         cd "$RUNNER_TEMP/bb/Bcore/src/main/java/top/niunaijun/blackbox/fake/service"
         cat > FakeIds.java <<'VAPP_JAVA_EOF'
@@ -584,7 +562,7 @@ jobs:
 
         # 4) WiFi IP: हर binder call का नतीजा जाँचो, getConnectionInfo हो तो IP बदलो (best effort)
         try:
-            cis = [] if os.environ.get('SKIP_NET_PATCH') == 'true' else glob.glob('../../**/ClassInvocationStub.java', recursive=True)
+            cis = glob.glob('../../**/ClassInvocationStub.java', recursive=True)
             if cis:
                 cp = cis[0]
                 cs = open(cp, encoding='utf-8').read()
@@ -2200,13 +2178,6 @@ jobs:
         printf '\ndependencies {\n    implementation "androidx.core:core-ktx:1.12.0"\n    implementation "androidx.appcompat:appcompat:1.6.1"\n    implementation "com.google.android.material:material:1.11.0"\n    implementation "androidx.recyclerview:recyclerview:1.3.2"\n}\n' >> app/build.gradle
         echo "---- patched app/build.gradle ----"
         cat app/build.gradle
-
-    - name: Test - remove WebView data-dir fix
-      if: ${{ inputs.skip_webview_fix }}
-      run: |
-        F="$RUNNER_TEMP/bb/app/src/main/java/com/example/virtualapp/MyApplication.kt"
-        sed -i '/^ *fixWebViewForVirtualProcess()$/d' "$F"
-        grep -n "fixWebViewForVirtualProcess" "$F" || true
 
     - name: Use fixed signing key (ताकि नया APK पुराने के ऊपर अपडेट हो जाए)
       run: |
