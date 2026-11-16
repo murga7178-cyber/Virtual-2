@@ -212,11 +212,34 @@ jobs:
                 return read(currentKey(), 5);
             }
 
+            // इस कॉपी का नकली WiFi MAC (bridge फ़ाइल का कॉलम 7)
+            public static String currentWifiMac() {
+                return read(currentKey(), 7);
+            }
+
             // WifiInfo लौटते समय उसका IP नकली IP से बदलो (सिर्फ़ ऐप के अंदर)
             public static Object fixWifiInfo(Object result) {
                 try {
                     if (!(result instanceof android.net.wifi.WifiInfo)) return result;
                     log("WIFI", "getConnectionInfo");
+                    try {
+                        String mac = currentWifiMac();
+                        if (mac != null && !mac.trim().isEmpty()) {
+                            mac = mac.trim();
+                            try {
+                                java.lang.reflect.Method mm = android.net.wifi.WifiInfo.class
+                                        .getDeclaredMethod("setMacAddress", String.class);
+                                mm.setAccessible(true);
+                                mm.invoke(result, mac);
+                            } catch (Throwable t0) {
+                                java.lang.reflect.Field mf = android.net.wifi.WifiInfo.class.getDeclaredField("mMacAddress");
+                                mf.setAccessible(true);
+                                mf.set(result, mac);
+                            }
+                            log("WIFI", "mac set " + mac);
+                        }
+                    } catch (Throwable ignoredMac) {
+                    }
                     String ip = currentWifiIp();
                     if (ip == null || ip.isEmpty()) return result;
                     java.net.InetAddress addr = java.net.InetAddress.getByName(ip);
@@ -429,6 +452,10 @@ jobs:
                     setBuild("MODEL", model);
                     setBuild("BRAND", brand.toLowerCase());
                     setBuild("MANUFACTURER", brand.toLowerCase());
+                    String serial = row.length > 6 ? row[6].trim() : "";
+                    if (!serial.isEmpty()) setBuild("SERIAL", serial);
+                    String ver = row.length > 8 ? row[8].trim() : "";
+                    if (!ver.isEmpty()) setBuildVersion("RELEASE", ver);
                     log("BUILD", brand + " " + model);
                 } catch (Throwable ignored) {
                 }
@@ -437,6 +464,15 @@ jobs:
             private static void setBuild(String name, String value) {
                 try {
                     java.lang.reflect.Field f = android.os.Build.class.getDeclaredField(name);
+                    f.setAccessible(true);
+                    f.set(null, value);
+                } catch (Throwable ignored) {
+                }
+            }
+
+            private static void setBuildVersion(String name, String value) {
+                try {
+                    java.lang.reflect.Field f = android.os.Build.VERSION.class.getDeclaredField(name);
                     f.setAccessible(true);
                     f.set(null, value);
                 } catch (Throwable ignored) {
@@ -501,7 +537,7 @@ jobs:
                 return row[col];
             }
 
-            // bridge फ़ाइल की लाइन: कुंजी|androidId|imei|brand|model
+            // bridge फ़ाइल की लाइन: कुंजी|androidId|imei|brand|model|wifiIp|serial|wifiMac|androidVer
             private static String[] readRow(String key) {
                 if (key == null) return null;
                 String host = BlackBoxCore.getHostPkg();
@@ -934,7 +970,7 @@ jobs:
                 holder.fakeId.visibility = View.VISIBLE
                 holder.fakeId.text = if (app.isAdded) {
                     val copiesLine = if (app.copies > 1) "📋 कुल कॉपी: ${app.copies}\n" else ""
-                    copiesLine + "✅ Android ID, IMEI/डिवाइस ID, Model/Brand: नकली लागू (वर्चुअल में चलाने पर)\n⚠️ MAC, IP, Serial आदि: असली दिख सकते हैं"
+                    copiesLine + "✅ Android ID, IMEI/डिवाइस ID, Model/Brand: नकली लागू (वर्चुअल में चलाने पर)\n⚠️ Bluetooth MAC, Mobile IP: असली दिख सकते हैं"
                 } else {
                     "⚠️ अभी नकली ID नहीं, असली पहचान दिख सकती है"
                 }
@@ -1140,8 +1176,7 @@ jobs:
                     "🧩 Google Play Services जोड़ें (प्रयोग)",
                     "⚙️ अनुमतियाँ दें (माइक, कैमरा, लोकेशन...)",
                     "🧯 क्रैश का रिकॉर्ड देखें",
-                    "📋 Logcat देखें / Copy करें (बंद होने की वजह)",
-                    "🌐 नेटवर्क जाँच का नतीजा (वर्चुअल के अंदर)"
+                    "📋 Logcat देखें / Copy करें (बंद होने की वजह)"
                 )
                 AlertDialog.Builder(this)
                     .setTitle(app.name)
@@ -1152,13 +1187,12 @@ jobs:
                             2 -> pickCopy(app) { copy -> addHomeShortcut(app, copy) }
                             3 -> pickCopy(app) { copy -> showIdentityDialog(app, copy) }
                             4 -> showInspect(app)
-                            5 -> chooseGmsSpace()
+                            5 -> pickCopy(app) { copy -> confirmGms(app, copy) }
                             6 -> startActivity(
                                 Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:$packageName"))
                             )
                             7 -> showCrashLog()
                             8 -> showLogcat()
-                            9 -> showNetDiag()
                         }
                     }
                     .setNegativeButton("बंद करें", null)
@@ -1215,9 +1249,11 @@ jobs:
                     .setView(makeGridScroll(grid))
                     .setNegativeButton("बंद करें", null)
                     .show()
+                val last = IdentityStore.lastCopy(this, app.packageName)
                 for (g in live.map { it / 50 }.distinct().sorted()) {
-                    val label = "${g * 50 + 1}–${g * 50 + 50}"
-                    val box = makeBox(label, 0xFF43A047.toInt())
+                    val isLast = last >= 0 && last / 50 == g
+                    val label = (if (isLast) "★ " else "") + "${g * 50 + 1}–${g * 50 + 50}"
+                    val box = makeBox(label, if (isLast) 0xFFFB8C00.toInt() else 0xFF43A047.toInt())
                     box.setOnClickListener { showCopyPage(app, live, g, dlg, action) }
                     grid.addView(box)
                 }
@@ -1236,9 +1272,15 @@ jobs:
                     .setNeutralButton("🗑 कॉपी हटाएँ") { _, _ -> onAppLongClicked(app) }
                     .setNegativeButton("बंद करें", null)
                     .show()
+                val last = IdentityStore.lastCopy(this, app.packageName)
                 for (c in items) {
-                    val box = makeBox("कॉपी ${c + 1}", 0xFF1E88E5.toInt())
+                    val isLast = c == last
+                    val box = makeBox(
+                        (if (isLast) "★ " else "") + "कॉपी ${c + 1}",
+                        if (isLast) 0xFFFB8C00.toInt() else 0xFF1E88E5.toInt()
+                    )
                     box.setOnClickListener {
+                        IdentityStore.setLastCopy(this, app.packageName, c)
                         dlg.dismiss()
                         parent?.dismiss()
                         action(c)
@@ -1308,13 +1350,14 @@ jobs:
                     📦 Model: ${id.model}
                     🏢 Brand: ${id.brand}
 
-                    ⚠️ अभी लागू नहीं (सिर्फ़ बनी हुई):
                     📶 WiFi MAC: ${id.wifiMac}
-                    🔵 Bluetooth MAC: ${id.bluetoothMac}
                     🌐 WiFi IP: ${id.wifiIp}
-                    📡 Mobile IP: ${id.mobileIp}
                     🔢 Serial: ${id.serial}
                     🤖 Android Version: ${id.androidVersion}
+
+                    ⚠️ अभी लागू नहीं (सिर्फ़ बनी हुई):
+                    🔵 Bluetooth MAC: ${id.bluetoothMac}
+                    📡 Mobile IP: ${id.mobileIp}
                 """.trimIndent()
 
                 AlertDialog.Builder(this)
@@ -1331,6 +1374,7 @@ jobs:
 
             // BlackBox के वर्चुअल स्पेस (कॉपी नंबर = यूज़र नंबर) में ऐप इंस्टॉल करके चलाओ
             private fun launchVirtual(app: AppInfo, copy: Int) {
+                IdentityStore.setLastCopy(this, app.packageName, copy)
                 Toast.makeText(this, "वर्चुअल स्पेस में खोल रहे हैं...", Toast.LENGTH_SHORT).show()
                 Thread {
                     try {
@@ -1401,31 +1445,6 @@ jobs:
                     .show()
             }
 
-            // वर्चुअल में चल रहे ऐप के अंदर से की गई नेटवर्क जाँच का नतीजा (files/netdiag.log)
-            private fun showNetDiag() {
-                val f = java.io.File(filesDir, "netdiag.log")
-                val text = if (f.exists() && f.length() > 0) {
-                    val all = f.readText()
-                    if (all.length > 3500) "…" + all.takeLast(3500) else all
-                } else {
-                    "अभी कोई नतीजा नहीं। किसी ऐप को वर्चुअल में चलाकर 15 सेकंड रुकें, फिर यहाँ देखें।"
-                }
-                AlertDialog.Builder(this)
-                    .setTitle("🌐 नेटवर्क जाँच")
-                    .setMessage(text)
-                    .setPositiveButton("Copy") { _, _ ->
-                        val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-                        clipboard.setPrimaryClip(ClipData.newPlainText("NetDiag", text))
-                        Toast.makeText(this, "Copy हो गया", Toast.LENGTH_SHORT).show()
-                    }
-                    .setNeutralButton("साफ़ करें") { _, _ ->
-                        f.delete()
-                        Toast.makeText(this, "रिकॉर्ड साफ़ हो गया", Toast.LENGTH_SHORT).show()
-                    }
-                    .setNegativeButton("बंद करें", null)
-                    .show()
-            }
-
             // ऐप का logcat पढ़कर दिखाओ (सिर्फ़ errors), Copy का बटन भी
             private fun showLogcat() {
                 Toast.makeText(this, "लॉग पढ़ रहा हूँ…", Toast.LENGTH_SHORT).show()
@@ -1455,25 +1474,12 @@ jobs:
                 }.start()
             }
 
-            // किस वर्चुअल नंबर में Google Play Services जोड़नी है, चुनो
-            private fun chooseGmsSpace() {
-                val spaces = (apps.maxOfOrNull { IdentityStore.copyCount(this, it.packageName) } ?: 1).coerceAtLeast(1)
-                val names = Array(spaces) { i ->
-                    "वर्चुअल नंबर ${i + 1}" + if (IdentityStore.hasGms(this, i)) "  (GMS जुड़ा ✔)" else ""
-                }
+            private fun confirmGms(app: AppInfo, space: Int) {
                 AlertDialog.Builder(this)
-                    .setTitle("किस वर्चुअल में Google Play Services जोड़ें?")
-                    .setItems(names) { _, which -> confirmGms(which) }
-                    .setNegativeButton("बंद करें", null)
-                    .show()
-            }
-
-            private fun confirmGms(space: Int) {
-                AlertDialog.Builder(this)
-                    .setTitle("वर्चुअल नंबर ${space + 1}")
+                    .setTitle("${app.name}: कॉपी ${space + 1}")
                     .setMessage(
                         "फ़ोन की Google Play Services, Services Framework और Play Store इस वर्चुअल नंबर में डालने की कोशिश होगी। " +
-                            "यह इस नंबर के सारे ऐप पर लागू होगा।\n\n" +
+                            "यह कॉपी ${space + 1} में चलने वाले ऐप पर लागू होगा।\n\n" +
                             "यह प्रयोग है, चलेगा या नहीं पक्का नहीं। अपना असली ज़रूरी Google खाता यहाँ न डालें।"
                     )
                     .setPositiveButton("जोड़ें") { _, _ -> addGms(space) }
@@ -1661,7 +1667,6 @@ jobs:
                 } catch (e: Throwable) {
                     Log.e("VirtualApp", "BlackBox attach fail: ${e.message}")
                 }
-                flushPermissionCache()
             }
 
             override fun onCreate() {
@@ -1669,7 +1674,6 @@ jobs:
                 installCrashLogger()
                 installHangWatchdog()
                 fixWebViewForVirtualProcess()
-                installNetSelfTest()
                 try {
                     BlackBoxCore.get().doCreate()
                 } catch (e: Throwable) {
@@ -1678,58 +1682,6 @@ jobs:
                 val virtualDir = File(filesDir, "virtual")
                 if (!virtualDir.exists()) virtualDir.mkdirs()
                 Log.d("VirtualApp", "Virtual dir ready: ${virtualDir.absolutePath}")
-            }
-
-            private var permFlushResult = "not run"
-
-            // Android 16: PermissionManager का cache पुराना "नहीं" (INTERNET=false) याद रख लेता है; उसे बंद/खाली करो
-            private fun flushPermissionCache() {
-                val sb = StringBuilder()
-                try {
-                    val pm = Class.forName("android.permission.PermissionManager")
-                    try {
-                        val m = pm.getDeclaredMethod("disablePermissionCache")
-                        m.isAccessible = true
-                        m.invoke(null)
-                        sb.append("disable=ok ")
-                    } catch (e: Throwable) {
-                        sb.append("disable=").append(e.javaClass.simpleName).append(" ")
-                    }
-                    try {
-                        val f = pm.getDeclaredField("sPermissionCache")
-                        f.isAccessible = true
-                        val cache = f.get(null)
-                        if (cache == null) {
-                            sb.append("cache=null ")
-                        } else {
-                            for (name in arrayOf("disableLocal", "clear")) {
-                                var done = false
-                                var c: Class<*>? = cache.javaClass
-                                while (!done) {
-                                    val cur = c ?: break
-                                    try {
-                                        val m = cur.getDeclaredMethod(name)
-                                        m.isAccessible = true
-                                        m.invoke(cache)
-                                        sb.append(name).append("=ok ")
-                                        done = true
-                                    } catch (e: NoSuchMethodException) {
-                                        c = cur.superclass
-                                    } catch (e: Throwable) {
-                                        sb.append(name).append("=").append(e.javaClass.simpleName).append(" ")
-                                        done = true
-                                    }
-                                }
-                                if (!done) sb.append(name).append("=none ")
-                            }
-                        }
-                    } catch (e: Throwable) {
-                        sb.append("field=").append(e.javaClass.simpleName).append(" ")
-                    }
-                } catch (e: Throwable) {
-                    sb.append("PermissionManager=").append(e.javaClass.simpleName)
-                }
-                permFlushResult = sb.toString()
             }
 
             // हर वर्चुअल प्रोसेस (:p0, :p1...) का अपना WebView फ़ोल्डर, वरना विज्ञापन (WebView) चलाते ही क्रैश हो सकता है
@@ -1745,119 +1697,7 @@ jobs:
                 }
             }
 
-                    // वर्चुअल प्रोसेस (:p0, :p1...) के अंदर से नेटवर्क की जाँच; नतीजा files/netdiag.log में और छोटा संदेश स्क्रीन पर
-            private fun installNetSelfTest() {
-                try {
-                    val pn = if (Build.VERSION.SDK_INT >= 28) Application.getProcessName() else null
-                    if (pn == null || pn == packageName || !pn.contains(":")) return
-                    val app = this
-                    android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
-                        Thread {
-                            val sb = StringBuilder()
-                            val fmt = java.text.SimpleDateFormat("dd MMM HH:mm:ss", java.util.Locale.getDefault())
-                            sb.append("[run __RUN_NO__] === ").append(fmt.format(java.util.Date())).append(" | ").append(pn).append("\n")
-                            try {
-                                val c = Class.forName("top.niunaijun.blackbox.app.BActivityThread")
-                                sb.append("ऐप=").append(c.getMethod("getAppPackageName").invoke(null))
-                                    .append(" कॉपी=").append(c.getMethod("getUserId").invoke(null)).append("\n")
-                            } catch (e: Throwable) {
-                                sb.append("ऐप=?\n")
-                            }
-                            var summary = "NET TEST: "
-                            try {
-                                val granted = app.checkPermission(
-                                    android.Manifest.permission.INTERNET,
-                                    android.os.Process.myPid(), android.os.Process.myUid()
-                                ) == android.content.pm.PackageManager.PERMISSION_GRANTED
-                                sb.append("SDK ").append(Build.VERSION.SDK_INT)
-                                    .append(" uid ").append(android.os.Process.myUid())
-                                    .append(" INTERNET=").append(granted).append("\n")
-                            } catch (e: Throwable) {
-                                sb.append("perm ERR ").append(e).append("\n")
-                            }
-                            try {
-                                val ip = android.Manifest.permission.INTERNET
-                                val ok = android.content.pm.PackageManager.PERMISSION_GRANTED
-                                val selfOk = app.checkSelfPermission(ip) == ok
-                                var gpkg = packageName
-                                try {
-                                    val bc = Class.forName("top.niunaijun.blackbox.app.BActivityThread")
-                                    gpkg = bc.getMethod("getAppPackageName").invoke(null) as String
-                                } catch (e: Throwable) {
-                                }
-                                val pmOk = app.packageManager.checkPermission(ip, gpkg) == ok
-                                var amRes = "?"
-                                try {
-                                    val amc = Class.forName("android.app.ActivityManager")
-                                    val svc = amc.getMethod("getService").invoke(null)
-                                    val r = svc.javaClass.getMethod(
-                                        "checkPermission", String::class.java,
-                                        Int::class.javaPrimitiveType, Int::class.javaPrimitiveType
-                                    ).invoke(svc, ip, android.os.Process.myPid(), android.os.Process.myUid()) as Int
-                                    amRes = (r == 0).toString()
-                                } catch (e: Throwable) {
-                                    amRes = "ERR " + e.javaClass.simpleName
-                                }
-                                sb.append("perm self=").append(selfOk).append(" pm=").append(pmOk)
-                                    .append(" am=").append(amRes).append("\n")
-                                flushPermissionCache()
-                                val afterOk = app.checkPermission(ip, android.os.Process.myPid(), android.os.Process.myUid()) == ok
-                                sb.append("flush: ").append(permFlushResult).append("| afterFlush=").append(afterOk).append("\n")
-                            } catch (e: Throwable) {
-                                sb.append("perm2 ERR ").append(e).append("\n")
-                            }
-                            try {
-                                val cm = app.getSystemService(Context.CONNECTIVITY_SERVICE) as android.net.ConnectivityManager
-                                val n = cm.activeNetwork
-                                val c = if (n == null) null else cm.getNetworkCapabilities(n)
-                                sb.append("activeNet=").append(n != null)
-                                    .append(" inet=").append(c != null && c.hasCapability(12))
-                                    .append(" valid=").append(c != null && c.hasCapability(16)).append("\n")
-                            } catch (e: Throwable) {
-                                sb.append("cm ERR ").append(e.javaClass.simpleName).append(": ").append(e.message).append("\n")
-                            }
-                            try {
-                                val a = java.net.InetAddress.getByName("www.google.com")
-                                sb.append("DNS ok ").append(a.hostAddress).append("\n")
-                                summary += "DNS ok, "
-                            } catch (e: Throwable) {
-                                sb.append("DNS ERR ").append(e.javaClass.simpleName).append(": ").append(e.message).append("\n")
-                                summary += "DNS ERR, "
-                            }
-                            try {
-                                val u = java.net.URL("https://www.google.com/generate_204")
-                                val hc = u.openConnection() as java.net.HttpURLConnection
-                                hc.connectTimeout = 8000
-                                hc.readTimeout = 8000
-                                val code = hc.responseCode
-                                hc.disconnect()
-                                sb.append("HTTPS code ").append(code).append("\n")
-                                summary += "HTTPS $code"
-                            } catch (e: Throwable) {
-                                sb.append("HTTPS ERR ").append(e.javaClass.simpleName).append(": ").append(e.message).append("\n")
-                                summary += "HTTPS ERR " + e.javaClass.simpleName
-                            }
-                            try {
-                                val f = File(filesDir, "netdiag.log")
-                                if (f.exists() && f.length() > 50_000) f.writeText("")
-                                f.appendText(sb.toString() + "\n")
-                            } catch (e: Throwable) {
-                            }
-                            val msg = summary
-                            android.os.Handler(android.os.Looper.getMainLooper()).post {
-                                try {
-                                    android.widget.Toast.makeText(app, msg, android.widget.Toast.LENGTH_LONG).show()
-                                } catch (e: Throwable) {
-                                }
-                            }
-                        }.start()
-                    }, 10000)
-                } catch (e: Throwable) {
-                    Log.w("VirtualApp", "net self test fail: ${e.message}")
-                }
-            }
-
-            // हैंग (अटकना) पकड़ने के लिए: अगर मेन थ्रेड 5 सेकंड से ज़्यादा अटकी रहे तो सारी थ्रेड्स का हाल crash.log में लिख दो
+                    // हैंग (अटकना) पकड़ने के लिए: अगर मेन थ्रेड 5 सेकंड से ज़्यादा अटकी रहे तो सारी थ्रेड्स का हाल crash.log में लिख दो
                     private fun installHangWatchdog() {
                         try {
                             val main = android.os.Handler(android.os.Looper.getMainLooper())
@@ -2030,10 +1870,14 @@ jobs:
                             val brand = (prefs.getString("${pkg}_brand", "") ?: "").replace("|", "/")
                             val model = (prefs.getString("${pkg}_model", "") ?: "").replace("|", "/")
                             val wifiIp = (prefs.getString("${pkg}_wifiIp", "") ?: "").replace("|", "/")
+                            val serial = (prefs.getString("${pkg}_serial", "") ?: "").replace("|", "/")
+                            val wifiMac = (prefs.getString("${pkg}_wifiMac", "") ?: "").replace("|", "/")
+                            val androidVer = (prefs.getString("${pkg}_androidVer", "") ?: "").replace("|", "/")
                             if (aid.isNotEmpty() && imei.isNotEmpty()) {
                                 sb.append(bridgeKey).append('|').append(aid).append('|').append(imei)
                                     .append('|').append(brand).append('|').append(model)
-                                    .append('|').append(wifiIp).append('\n')
+                                    .append('|').append(wifiIp).append('|').append(serial)
+                                    .append('|').append(wifiMac).append('|').append(androidVer).append('\n')
                             }
                         }
                     }
@@ -2081,6 +1925,15 @@ jobs:
             // कॉपी की key: कॉपी 0 = पैकेज, कॉपी N = पैकेज@N (N वर्चुअल यूज़र नंबर)
             fun key(packageName: String, copy: Int): String =
                 if (copy == 0) packageName else "$packageName@$copy"
+
+            // इस ऐप की सबसे आख़िरी बार क्लिक/खोली गई कॉपी (-1 = अभी कोई नहीं)
+            fun lastCopy(context: Context, packageName: String): Int =
+                context.getSharedPreferences(PREF, Context.MODE_PRIVATE).getInt("${packageName}__last", -1)
+
+            fun setLastCopy(context: Context, packageName: String, copy: Int) {
+                context.getSharedPreferences(PREF, Context.MODE_PRIVATE)
+                    .edit().putInt("${packageName}__last", copy).apply()
+            }
 
             fun copyCount(context: Context, packageName: String): Int {
                 val prefs = context.getSharedPreferences(PREF, Context.MODE_PRIVATE)
@@ -2323,14 +2176,6 @@ jobs:
         echo "---- patched app/build.gradle ----"
         cat app/build.gradle
 
-    - name: Stamp build number
-      env:
-        RUN_NO: ${{ github.run_number }}
-      run: |
-        F="$RUNNER_TEMP/bb/app/src/main/java/com/example/virtualapp/MyApplication.kt"
-        sed -i "s/__RUN_NO__/$RUN_NO/" "$F"
-        grep -n "\[run " "$F"
-
     - name: Use fixed signing key (ताकि नया APK पुराने के ऊपर अपडेट हो जाए)
       run: |
         cd "$RUNNER_TEMP/bb"
@@ -2395,11 +2240,16 @@ jobs:
         mkdir -p "$GITHUB_WORKSPACE/src-out"
         cd "$RUNNER_TEMP/bb/Bcore/src/main/java/top/niunaijun/blackbox"
         zip -r -q "$GITHUB_WORKSPACE/src-out/blackbox-src.zip" .
+        # नेटवर्क/uid वाला नेटिव (C++) कोड भी सेव करो
+        N=$(find "$RUNNER_TEMP/bb/Bcore" -type d \( -name cpp -o -name jni \) -not -path "*/build/*" | head -1)
+        if [ -n "$N" ]; then (cd "$N" && zip -r -q "$GITHUB_WORKSPACE/src-out/blackbox-native.zip" .); fi
 
     - name: Upload BlackBox source
       if: always()
       uses: actions/upload-artifact@v4
       with:
         name: blackbox-src
-        path: src-out/blackbox-src.zip
+        path: |
+          src-out/blackbox-src.zip
+          src-out/blackbox-native.zip
 
