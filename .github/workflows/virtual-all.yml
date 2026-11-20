@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       copies:
-        description: 'कितने अलग-अलग ऐप (APK) बनाने हैं? 1 से 10 (हर एक का पैकेज नाम और डाटा अलग)'
+        description: 'कितने अलग-अलग ऐप (APK) बनाने हैं? 1 से 100 (पहला असली ऐप है, बाकी हर एक का पैकेज नाम और डाटा अलग)'
         required: false
         default: '1'
 
@@ -25,8 +25,8 @@ jobs:
         N=${N:-1}
         case "$N" in ''|*[!0-9]*) N=1;; esac
         [ "$N" -lt 1 ] && N=1
-        [ "$N" -gt 10 ] && N=10
-        LIST=$(seq -s, 0 $((N-1)))
+        [ "$N" -gt 100 ] && N=100
+        LIST=$(seq -s, 1 "$N")
         echo "list=[$LIST]" >> "$GITHUB_OUTPUT"
         echo "copies: $N -> [$LIST]"
 
@@ -2359,8 +2359,8 @@ jobs:
         cd "$RUNNER_TEMP/bb"
         echo "---- Bcore manifest: authorities / permissions (दो कॉपी टकराएँ तो यही वजह होगी) ----"
         grep -n "authorities\|<permission" Bcore/src/main/AndroidManifest.xml || true
-        if [ "$COPY" != "0" ]; then
-          N=$((COPY + 1))
+        if [ "$COPY" != "1" ]; then
+          N=$COPY
           sed -i -E "s/(applicationId[[:space:]]*=?[[:space:]]*)'com.example.virtualapp'/\1'com.example.virtualapp${N}'/" app/build.gradle
           sed -i "s/android:label=\"VirtualApp\"/android:label=\"VirtualApp ${N}\"/" app/src/main/AndroidManifest.xml
           sed -i "s|<string name=\"app_name\">VirtualApp</string>|<string name=\"app_name\">VirtualApp ${N}</string>|" app/src/main/res/values/strings.xml
@@ -2423,11 +2423,11 @@ jobs:
     - name: Upload APK
       uses: actions/upload-artifact@v4
       with:
-        name: ${{ matrix.copy == 0 && 'app-debug' || format('app-debug-copy{0}', matrix.copy + 1) }}
+        name: ${{ matrix.copy == 1 && 'app-debug' || format('app-debug-copy{0}', matrix.copy) }}
         path: out/app-debug.apk
 
     - name: Save BlackBox source for review
-      if: always() && matrix.copy == 0
+      if: always() && matrix.copy == 1
       run: |
         mkdir -p "$GITHUB_WORKSPACE/src-out"
         cd "$RUNNER_TEMP/bb/Bcore/src/main/java/top/niunaijun/blackbox"
@@ -2437,7 +2437,7 @@ jobs:
         if [ -n "$N" ]; then (cd "$N" && zip -r -q "$GITHUB_WORKSPACE/src-out/blackbox-native.zip" .); fi
 
     - name: Upload BlackBox source
-      if: always() && matrix.copy == 0
+      if: always() && matrix.copy == 1
       uses: actions/upload-artifact@v4
       with:
         name: blackbox-src
