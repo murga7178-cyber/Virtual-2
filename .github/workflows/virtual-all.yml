@@ -5,10 +5,38 @@ on:
   push:
     branches: [ "main" ]
   workflow_dispatch:
+    inputs:
+      copies:
+        description: 'कितने अलग-अलग ऐप (APK) बनाने हैं? 1 से 10 (हर एक का पैकेज नाम और डाटा अलग)'
+        required: false
+        default: '1'
 
 jobs:
-  build:
+  plan:
     runs-on: ubuntu-latest
+    outputs:
+      list: ${{ steps.p.outputs.list }}
+    steps:
+    - name: Decide how many copies
+      id: p
+      env:
+        N: ${{ github.event.inputs.copies }}
+      run: |
+        N=${N:-1}
+        case "$N" in ''|*[!0-9]*) N=1;; esac
+        [ "$N" -lt 1 ] && N=1
+        [ "$N" -gt 10 ] && N=10
+        LIST=$(seq -s, 0 $((N-1)))
+        echo "list=[$LIST]" >> "$GITHUB_OUTPUT"
+        echo "copies: $N -> [$LIST]"
+
+  build:
+    needs: plan
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        copy: ${{ fromJson(needs.plan.outputs.list) }}
 
     steps:
     - name: Set up JDK 21
@@ -2324,6 +2352,22 @@ jobs:
         echo "---- patched app/build.gradle ----"
         cat app/build.gradle
 
+    - name: Make separate app copy (अलग पैकेज नाम = अलग ऐप, अलग डाटा)
+      env:
+        COPY: ${{ matrix.copy }}
+      run: |
+        cd "$RUNNER_TEMP/bb"
+        echo "---- Bcore manifest: authorities / permissions (दो कॉपी टकराएँ तो यही वजह होगी) ----"
+        grep -n "authorities\|<permission" Bcore/src/main/AndroidManifest.xml || true
+        if [ "$COPY" != "0" ]; then
+          N=$((COPY + 1))
+          sed -i -E "s/(applicationId[[:space:]]*=?[[:space:]]*)'com.example.virtualapp'/\1'com.example.virtualapp${N}'/" app/build.gradle
+          sed -i "s/android:label=\"VirtualApp\"/android:label=\"VirtualApp ${N}\"/" app/src/main/AndroidManifest.xml
+          sed -i "s|<string name=\"app_name\">VirtualApp</string>|<string name=\"app_name\">VirtualApp ${N}</string>|" app/src/main/res/values/strings.xml
+          grep -n "applicationId" app/build.gradle
+          grep -n "android:label" app/src/main/AndroidManifest.xml
+        fi
+
     - name: Use fixed signing key (ताकि नया APK पुराने के ऊपर अपडेट हो जाए)
       run: |
         cd "$RUNNER_TEMP/bb"
@@ -2379,11 +2423,11 @@ jobs:
     - name: Upload APK
       uses: actions/upload-artifact@v4
       with:
-        name: app-debug
+        name: ${{ matrix.copy == 0 && 'app-debug' || format('app-debug-copy{0}', matrix.copy + 1) }}
         path: out/app-debug.apk
 
     - name: Save BlackBox source for review
-      if: always()
+      if: always() && matrix.copy == 0
       run: |
         mkdir -p "$GITHUB_WORKSPACE/src-out"
         cd "$RUNNER_TEMP/bb/Bcore/src/main/java/top/niunaijun/blackbox"
@@ -2393,7 +2437,7 @@ jobs:
         if [ -n "$N" ]; then (cd "$N" && zip -r -q "$GITHUB_WORKSPACE/src-out/blackbox-native.zip" .); fi
 
     - name: Upload BlackBox source
-      if: always()
+      if: always() && matrix.copy == 0
       uses: actions/upload-artifact@v4
       with:
         name: blackbox-src
