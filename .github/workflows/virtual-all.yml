@@ -67,7 +67,11 @@ jobs:
             @Override
             public Object invoke(Object proxy, Method method, Object[] args) throws Throwable {
                 MethodParameterUtils.replaceAllAppPkg(args);
-                return super.invoke(proxy, method, args);
+                Object vappRes = super.invoke(proxy, method, args);
+                if (method != null && "getLinkProperties".equals(method.getName())) {
+                    return FakeIds.fixLinkProperties(vappRes);
+                }
+                return vappRes;
             }
         }
         CPP_EOF
@@ -264,6 +268,55 @@ jobs:
                 return result;
             }
 
+            // इस कॉपी का नकली Bluetooth MAC (bridge फ़ाइल का कॉलम 9)
+            public static String currentBtMac() {
+                return read(currentKey(), 9);
+            }
+
+            // इस कॉपी का नकली Mobile IP (bridge फ़ाइल का कॉलम 10)
+            public static String currentMobileIp() {
+                return read(currentKey(), 10);
+            }
+
+            // Bluetooth का पता (getAddress) MAC जैसा दिखे तो उसे नकली Bluetooth MAC से बदलो
+            public static String fixBtAddress(String real) {
+                try {
+                    if (real == null || !real.matches("([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}")) return real;
+                    String bt = currentBtMac();
+                    if (bt == null || bt.trim().isEmpty()) return real;
+                    log("BLUETOOTH", "getAddress");
+                    return bt.trim();
+                } catch (Throwable t) {
+                    return real;
+                }
+            }
+
+            // getLinkProperties का नतीजा: अगर यह मोबाइल डेटा का नेटवर्क है तो उसका IP नकली Mobile IP से बदलो (सिर्फ़ ऐप के अंदर)
+            public static Object fixLinkProperties(Object result) {
+                try {
+                    if (!(result instanceof android.net.LinkProperties)) return result;
+                    String ip = currentMobileIp();
+                    if (ip == null || ip.trim().isEmpty()) return result;
+                    android.net.LinkProperties lp = (android.net.LinkProperties) result;
+                    String ifn = lp.getInterfaceName();
+                    if (ifn == null || ifn.startsWith("wlan") || ifn.startsWith("lo")
+                            || ifn.startsWith("tun") || ifn.startsWith("eth") || ifn.startsWith("p2p")) return result;
+                    java.net.InetAddress addr = java.net.InetAddress.getByName(ip.trim());
+                    Class<?> laCls = Class.forName("android.net.LinkAddress");
+                    Object link = laCls.getConstructor(java.net.InetAddress.class, int.class).newInstance(addr, 24);
+                    java.util.ArrayList<Object> list = new java.util.ArrayList<Object>();
+                    list.add(link);
+                    java.lang.reflect.Method m = android.net.LinkProperties.class
+                            .getDeclaredMethod("setLinkAddresses", java.util.Collection.class);
+                    m.setAccessible(true);
+                    m.invoke(lp, list);
+                    log("MOBILE", "ip set " + ip);
+                } catch (Throwable t) {
+                    log("MOBILE", "failed " + t.getClass().getSimpleName());
+                }
+                return result;
+            }
+
             private static boolean sBuildApplied = false;
 
             // वर्चुअल ऐप (जैसे Google Play Services) जब "सब यूज़र्स" (-1) को broadcast भेजे तो सिस्टम मना कर देता है और वो क्रैश होता है।
@@ -456,6 +509,14 @@ jobs:
                     if (!serial.isEmpty()) setBuild("SERIAL", serial);
                     String ver = row.length > 8 ? row[8].trim() : "";
                     if (!ver.isEmpty()) setBuildVersion("RELEASE", ver);
+                    // हर कॉपी का अपना अलग Build.FINGERPRINT / DEVICE / PRODUCT (पहले सब कॉपी में असली फ़ोन वाला एक जैसा दिखता था)
+                    String fp = row.length > 11 ? row[11].trim() : "";
+                    if (!fp.isEmpty()) setBuild("FINGERPRINT", fp);
+                    String code = model.toLowerCase().replaceAll("[^a-z0-9]", "");
+                    if (!code.isEmpty()) {
+                        setBuild("DEVICE", code);
+                        setBuild("PRODUCT", code);
+                    }
                     log("BUILD", brand + " " + model);
                 } catch (Throwable ignored) {
                 }
@@ -520,6 +581,21 @@ jobs:
                             break;
                         }
                     }
+                    boolean isBt = false;
+                    for (Object a : args) {
+                        if ("bluetooth_address".equals(a)) {
+                            isBt = true;
+                            break;
+                        }
+                    }
+                    if (isBt) {
+                        String bt = currentBtMac();
+                        if (bt == null || bt.trim().isEmpty()) return result;
+                        Bundle b2 = new Bundle((Bundle) result);
+                        b2.putString("value", bt.trim());
+                        log("BLUETOOTH", "settings bluetooth_address");
+                        return b2;
+                    }
                     if (!isAndroidId) return result;
                     String fake = currentAndroidId();
                     if (fake == null) return result;
@@ -537,7 +613,7 @@ jobs:
                 return row[col];
             }
 
-            // bridge फ़ाइल की लाइन: कुंजी|androidId|imei|brand|model|wifiIp|serial|wifiMac|androidVer
+            // bridge फ़ाइल की लाइन: कुंजी|androidId|imei|brand|model|wifiIp|serial|wifiMac|androidVer|btMac|mobileIp|fingerprint
             private static String[] readRow(String key) {
                 if (key == null) return null;
                 String host = BlackBoxCore.getHostPkg();
@@ -665,6 +741,9 @@ jobs:
                 repl2 = ('public Object invoke(Object proxy, Method method, Object[] args) throws Throwable {\n'
                          '        top.niunaijun.blackbox.fake.service.FakeIds.fixBroadcastUser(method, args);\n'
                          '        Object vappResult = vappInvokeOrig(proxy, method, args);\n'
+                         '        if (method != null && "getAddress".equals(method.getName()) && vappResult instanceof String) {\n'
+                         '            return top.niunaijun.blackbox.fake.service.FakeIds.fixBtAddress((String) vappResult);\n'
+                         '        }\n'
                          '        if (method != null && "getConnectionInfo".equals(method.getName())) {\n'
                          '            return top.niunaijun.blackbox.fake.service.FakeIds.fixWifiInfo(vappResult);\n'
                          '        }\n'
@@ -694,6 +773,8 @@ jobs:
             print('MODEL PATCH SKIPPED: BActivityThread.java not found')
         VAPP_PY_EOF
         grep -n "vappInvokeOrig\|import .*FakeIds" context/providers/SystemProviderStub.java context/providers/ContentProviderStub.java | head
+        echo "===== bluetooth proxy files ====="
+        ls | grep -i bluetooth || echo "no bluetooth proxy file in fake/service"
         echo "===== app start code (for Model patch) ====="
         grep -n "handleBindApplication\|makeApplication\|callApplicationOnCreate\|applyBuild" ../../app/BActivityThread.java | head -20 || true
 
@@ -970,7 +1051,7 @@ jobs:
                 holder.fakeId.visibility = View.VISIBLE
                 holder.fakeId.text = if (app.isAdded) {
                     val copiesLine = if (app.copies > 1) "📋 कुल कॉपी: ${app.copies}\n" else ""
-                    copiesLine + "✅ Android ID, IMEI/डिवाइस ID, Model/Brand: नकली लागू (वर्चुअल में चलाने पर)\n⚠️ Bluetooth MAC, Mobile IP: असली दिख सकते हैं"
+                    copiesLine + "✅ Android ID, IMEI/डिवाइस ID, Model/Brand: नकली लागू (वर्चुअल में चलाने पर)\n✅ Bluetooth MAC, Mobile IP भी नकली (ऐप के सामान्य तरीके से पढ़ने पर)"
                 } else {
                     "⚠️ अभी नकली ID नहीं, असली पहचान दिख सकती है"
                 }
@@ -1269,7 +1350,7 @@ jobs:
                 val dlg = AlertDialog.Builder(this)
                     .setTitle("${app.name}  (${page * 50 + 1}–${page * 50 + 50})")
                     .setView(makeGridScroll(grid))
-                    .setNeutralButton("🗑 कॉपी हटाएँ") { _, _ -> onAppLongClicked(app) }
+                    .setNeutralButton("🗑 कॉपी हटाएँ") { _, _ -> showDeleteChooser(app) }
                     .setNegativeButton("बंद करें", null)
                     .show()
                 val last = IdentityStore.lastCopy(this, app.packageName)
@@ -1286,7 +1367,7 @@ jobs:
                         action(c)
                     }
                     box.setOnLongClickListener {
-                        confirmDeleteCopy(app, c) { dlg.dismiss(); parent?.dismiss() }
+                        showCopyStatus(app, c) { dlg.dismiss(); parent?.dismiss() }
                         true
                     }
                     grid.addView(box)
@@ -1355,7 +1436,7 @@ jobs:
                     🔢 Serial: ${id.serial}
                     🤖 Android Version: ${id.androidVersion}
 
-                    ⚠️ अभी लागू नहीं (सिर्फ़ बनी हुई):
+                    ✅ ये भी लागू (ऐप के सामान्य तरीके से पढ़ने पर):
                     🔵 Bluetooth MAC: ${id.bluetoothMac}
                     📡 Mobile IP: ${id.mobileIp}
                 """.trimIndent()
@@ -1562,8 +1643,70 @@ jobs:
                     .show()
             }
 
-            // Long-press → कौन-सी कॉपी हटानी है, चुनो (सिर्फ़ वही हटेगी)
+                // Long-press (ऐप की लाइन पर) → कॉपी चुनो → उस कॉपी की अपनी स्थिति
             private fun onAppLongClicked(app: AppInfo) {
+                val live = IdentityStore.liveCopies(this, app.packageName)
+                    .filter { IdentityStore.hasIdentity(this, app.packageName, it) }
+                if (live.isEmpty()) {
+                    Toast.makeText(this, "इस ऐप की कोई कॉपी अभी बनी नहीं है", Toast.LENGTH_SHORT).show()
+                    return
+                }
+                if (live.size == 1) {
+                    showCopyStatus(app, live[0])
+                    return
+                }
+                pickCopy(app) { c -> showCopyStatus(app, c) }
+            }
+
+            // हर कॉपी की अपनी अलग स्थिति: क्या नकली नंबर/ID लागू है, कौन-सा लागू नहीं + बंद करें / हटाएँ
+            private fun showCopyStatus(app: AppInfo, copy: Int, onDone: () -> Unit = {}) {
+                val id = IdentityStore.getOrCreate(this, IdentityStore.key(app.packageName, copy))
+                val others = IdentityStore.liveCopies(this, app.packageName).filter { it != copy }
+                    .filter { IdentityStore.hasIdentity(this, app.packageName, it) }
+                    .map { IdentityStore.getOrCreate(this, IdentityStore.key(app.packageName, it)) }
+                val sameAsOther = others.any { it.androidId == id.androidId || it.imei == id.imei || it.wifiMac == id.wifiMac }
+                val diffLine = if (others.isEmpty()) "ℹ️ यही अकेली कॉपी है"
+                    else if (sameAsOther) "⚠️ इस कॉपी की कुछ ID दूसरी कॉपी से मिलती हैं"
+                    else "✅ इस कॉपी की ID बाकी सब कॉपियों से अलग है (नंबर बदला हुआ)"
+                val gms = if (IdentityStore.hasGms(this, copy)) "✅ Google Play Services: जोड़ी गई" else "➖ Google Play Services: नहीं जोड़ी"
+
+                val message = """
+                    📱 ${app.name} (कॉपी ${copy + 1})
+
+                    $diffLine
+
+                    ✅ इस कॉपी में नकली लागू (वर्चुअल में चलाने पर):
+                    🆔 Android ID: ${id.androidId}
+                    📞 IMEI / Device ID: ${id.imei}
+                    📶 WiFi MAC: ${id.wifiMac}
+                    🌐 WiFi IP: ${id.wifiIp}
+                    🔢 Serial: ${id.serial}
+                    📦 Model: ${id.model}
+                    🏢 Brand: ${id.brand}
+                    🤖 Android Version: ${id.androidVersion}
+
+                    ✅ ये भी लागू (ऐप के सामान्य तरीके से पढ़ने पर):
+                    🔵 Bluetooth MAC: ${id.bluetoothMac}
+                    📡 Mobile IP: ${id.mobileIp}
+
+                    $gms
+                """.trimIndent()
+
+                AlertDialog.Builder(this)
+                    .setTitle("कॉपी ${copy + 1} की स्थिति")
+                    .setMessage(message)
+                    .setPositiveButton("Copy") { _, _ ->
+                        val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                        clipboard.setPrimaryClip(ClipData.newPlainText("CopyStatus", message))
+                        Toast.makeText(this, "Copy हो गया", Toast.LENGTH_SHORT).show()
+                    }
+                    .setNeutralButton("🗑 हटाएँ") { _, _ -> confirmDeleteCopy(app, copy, onDone) }
+                    .setNegativeButton("बंद करें", null)
+                    .show()
+            }
+
+            // कौन-सी कॉपी हटानी है, चुनो (सिर्फ़ वही हटेगी)
+            private fun showDeleteChooser(app: AppInfo) {
                 val live = IdentityStore.liveCopies(this, app.packageName)
                     .filter { IdentityStore.hasIdentity(this, app.packageName, it) }
                 if (live.isEmpty()) {
@@ -1873,11 +2016,16 @@ jobs:
                             val serial = (prefs.getString("${pkg}_serial", "") ?: "").replace("|", "/")
                             val wifiMac = (prefs.getString("${pkg}_wifiMac", "") ?: "").replace("|", "/")
                             val androidVer = (prefs.getString("${pkg}_androidVer", "") ?: "").replace("|", "/")
+                            val btMac = (prefs.getString("${pkg}_btMac", "") ?: "").replace("|", "/")
+                            val mobileIp = (prefs.getString("${pkg}_mobileIp", "") ?: "").replace("|", "/")
+                            val fp = (prefs.getString("${pkg}_fingerprint", "") ?: "").replace("|", "/")
                             if (aid.isNotEmpty() && imei.isNotEmpty()) {
                                 sb.append(bridgeKey).append('|').append(aid).append('|').append(imei)
                                     .append('|').append(brand).append('|').append(model)
                                     .append('|').append(wifiIp).append('|').append(serial)
-                                    .append('|').append(wifiMac).append('|').append(androidVer).append('\n')
+                                    .append('|').append(wifiMac).append('|').append(androidVer)
+                                    .append('|').append(btMac).append('|').append(mobileIp)
+                                    .append('|').append(fp).append('\n')
                             }
                         }
                     }
