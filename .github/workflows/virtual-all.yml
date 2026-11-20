@@ -345,6 +345,30 @@ jobs:
                 return result;
             }
 
+            // ऐप जब किसी दूसरी सेवा (जैसे Google Play Services) से जुड़ने (bind) की कोशिश करे तो उसका रिकॉर्ड रखो।
+            // विज्ञापन ID (GAID) और Install Referrer ऐसे ही फ़ोन की असली पहचान पढ़ते हैं और सारी कॉपियों में एक जैसे आते हैं,
+            // इसलिए पहली कॉपी के अलावा हर कॉपी में इन दोनों से जुड़ना रोक दो (ऐप को "उपलब्ध नहीं" मिलेगा, वह नए की तरह चलेगा)।
+            public static boolean shouldBlockBind(android.content.Intent intent) {
+                try {
+                    if (intent == null) return false;
+                    String pkg = BActivityThread.getAppPackageName();
+                    android.content.ComponentName c = intent.getComponent();
+                    String cp = c != null ? c.getPackageName() : intent.getPackage();
+                    if (pkg != null && pkg.equals(cp)) return false;
+                    String act = intent.getAction();
+                    String cls = c != null ? c.getClassName() : "";
+                    log("BIND", act != null ? act : (c != null ? c.flattenToShortString() : "?"));
+                    boolean ads = (act != null && act.contains("ads.identifier")) || cls.contains("AdvertisingIdService");
+                    boolean ref = (act != null && act.toUpperCase().contains("INSTALL_REFERRER")) || cls.contains("InstallReferrer");
+                    if ((ads || ref) && BActivityThread.getUserId() > 0) {
+                        log("BIND_BLOCKED", ads ? "advertising id" : "install referrer");
+                        return true;
+                    }
+                } catch (Throwable ignored) {
+                }
+                return false;
+            }
+
             private static boolean sBuildApplied = false;
 
             // वर्चुअल ऐप (जैसे Google Play Services) जब "सब यूज़र्स" (-1) को broadcast भेजे तो सिस्टम मना कर देता है और वो क्रैश होता है।
@@ -788,6 +812,38 @@ jobs:
                 print('WIFI IP PATCH SKIPPED: ClassInvocationStub.java not found')
         except Exception as e:
             print('WIFI IP PATCH SKIPPED:', e)
+        # 8) स्टोरेज: BlackBox हर कॉपी का /sdcard पहले से अलग रखता है; बाकी रास्ते (self/primary, /mnt/sdcard) भी उसी में जोड़ो,
+        #    और Pictures फ़ोल्डर भी नंबर 0 के अलावा हर कॉपी में अलग करो (पहले वह असली फ़ोन से साझा था)
+        try:
+            ip = '../../core/IOCore.java'
+            ic = open(ip, encoding='utf-8').read()
+            o1 = 'rule.put(String.format("/storage/emulated/%d", systemUserId), external.getAbsolutePath());'
+            o2 = ('blackRule.add("/sdcard/Pictures");\n'
+                  '                blackRule.add(String.format("/storage/emulated/%d/Pictures", systemUserId));')
+            if ic.count(o1) == 1 and ic.count(o2) == 1:
+                ic = ic.replace(o1, o1 + '\n                rule.put("/storage/self/primary", external.getAbsolutePath());\n                rule.put("/mnt/sdcard", external.getAbsolutePath());')
+                ic = ic.replace(o2, 'if (BlackBoxCore.getUserId() <= 0) {\n                    ' + o2.replace('\n                ', '\n                    ') + '\n                }')
+                open(ip, 'w', encoding='utf-8').write(ic)
+                print('STORAGE PATCH APPLIED in', ip)
+            else:
+                print('STORAGE PATCH SKIPPED: found', ic.count(o1), ic.count(o2))
+        except Exception as e:
+            print('STORAGE PATCH SKIPPED:', e)
+        # 9) विज्ञापन ID / Install Referrer से जुड़ना (पहली कॉपी के अलावा) रोको और हर जुड़ाव का रिकॉर्ड रखो
+        try:
+            bp = 'IActivityManagerProxy.java'
+            bs = open(bp, encoding='utf-8').read()
+            o = ('Slog.w(TAG, "BindServiceCommon: Intent is null, proceeding with original call");\n'
+                 '                return method.invoke(who, args);\n'
+                 '            }\n')
+            if bs.count(o) == 1:
+                bs = bs.replace(o, o + '            if (FakeIds.shouldBlockBind(intent)) { return Integer.valueOf(0); }\n')
+                open(bp, 'w', encoding='utf-8').write(bs)
+                print('BIND PATCH APPLIED in', bp)
+            else:
+                print('BIND PATCH SKIPPED: found', bs.count(o))
+        except Exception as e:
+            print('BIND PATCH SKIPPED:', e)
         if ba:
             s = open(ba, encoding='utf-8').read()
             pat2 = re.compile(r'(void\s+handleBindApplication\s*\([^)]*\)\s*(?:throws\s+[\w\s,.]+)?\{)')
@@ -1025,7 +1081,7 @@ jobs:
                 for ((k, n) in counts) {
                     val kind = k.substringBefore('|')
                     val name = k.substringAfter('|')
-                    val label = if (kind == "PHONE") "📞 फ़ोन ID माँगी" else "⚙️ सेटिंग पढ़ी"
+                    val label = if (kind == "PHONE") "📞 फ़ोन ID माँगी" else if (kind == "BIND") "🔗 दूसरी सेवा से जुड़ा" else if (kind == "BIND_BLOCKED") "🚫 रोका गया" else "⚙️ सेटिंग पढ़ी"
                     sb.append("• $label: $name ($n बार चलाने में, आख़िरी ${fmt.format(Date(last[k] ?: 0L))})\n")
                 }
                 sb.append("\nनोट: यह सिर्फ़ वही दिखाता है जो BlackBox पकड़ पाता है। विज्ञापन ID Google Play Services से आती है, वह यहाँ नहीं दिखेगी।\n")
@@ -1696,6 +1752,7 @@ jobs:
                 val diffLine = if (others.isEmpty()) "ℹ️ यही अकेली कॉपी है"
                     else if (sameAsOther) "⚠️ इस कॉपी की कुछ ID दूसरी कॉपी से मिलती हैं"
                     else "✅ इस कॉपी की ID बाकी सब कॉपियों से अलग है (नंबर बदला हुआ)"
+                val storage = "📁 स्टोरेज: इस कॉपी का अपना अलग /sdcard (दूसरी कॉपी से नहीं मिलता)"
                 val gms = if (IdentityStore.hasGms(this, copy)) "✅ Google Play Services: जोड़ी गई" else "➖ Google Play Services: नहीं जोड़ी"
 
                 val message = """
@@ -1718,6 +1775,8 @@ jobs:
                     📡 Mobile IP: ${id.mobileIp}
 
                     $gms
+
+                    $storage
                 """.trimIndent()
 
                 AlertDialog.Builder(this)
