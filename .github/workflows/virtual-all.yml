@@ -360,7 +360,8 @@ jobs:
                     log("BIND", act != null ? act : (c != null ? c.flattenToShortString() : "?"));
                     boolean ads = (act != null && act.contains("ads.identifier")) || cls.contains("AdvertisingIdService");
                     boolean ref = (act != null && act.toUpperCase().contains("INSTALL_REFERRER")) || cls.contains("InstallReferrer");
-                    if ((ads || ref) && BActivityThread.getUserId() > 0) {
+                    if ((ads || ref) && BActivityThread.getUserId() > 0
+                            && !BlackBoxCore.get().isInstalled("com.google.android.gms", BActivityThread.getUserId())) {
                         log("BIND_BLOCKED", ads ? "advertising id" : "install referrer");
                         return true;
                     }
@@ -613,6 +614,18 @@ jobs:
                 }
             }
 
+            // इस कॉपी के androidId से निकला अलग-अलग नकली मान (हर कॉपी का अलग, हर बार एक जैसा)
+            private static String fakeSettingValue(String name) {
+                String aid = currentAndroidId();
+                if (aid == null || aid.trim().isEmpty()) return null;
+                if (name.equals("advertising_id")) {
+                    return java.util.UUID.nameUUIDFromBytes(("gaid|" + aid).getBytes()).toString();
+                }
+                if (name.equals("limit_ad_tracking")) return "0";
+                if (name.equals("boot_count")) return String.valueOf(40 + (Math.abs(aid.hashCode()) % 800));
+                return null;
+            }
+
             // Settings provider की call() का जवाब: android_id माँगा गया तो नकली ID डालो
             public static Object fixSettingsCall(Object[] args, Object result) {
                 try {
@@ -647,6 +660,24 @@ jobs:
                         b2.putString("value", bt.trim());
                         log("BLUETOOTH", "settings bluetooth_address");
                         return b2;
+                    }
+                    // ऐप ने सेटिंग से विज्ञापन ID / boot_count पढ़ा तो हर कॉपी का अपना अलग नकली मान दो
+                    String gname = null;
+                    for (Object a : args) {
+                        if (a instanceof String) {
+                            String v = (String) a;
+                            if (v.equals("advertising_id") || v.equals("limit_ad_tracking") || v.equals("boot_count")) {
+                                gname = v;
+                                break;
+                            }
+                        }
+                    }
+                    if (gname != null) {
+                        String fv = fakeSettingValue(gname);
+                        if (fv == null) return result;
+                        Bundle b3 = new Bundle((Bundle) result);
+                        b3.putString("value", fv);
+                        return b3;
                     }
                     if (!isAndroidId) return result;
                     String fake = currentAndroidId();
@@ -844,6 +875,44 @@ jobs:
                 print('BIND PATCH SKIPPED: found', bs.count(o))
         except Exception as e:
             print('BIND PATCH SKIPPED:', e)
+        # 10) BlackBox की गलती: कॉपी 2,3,4... (userId>0) का बंद हुआ प्रोसेस रिकॉर्ड सूची से हटता ही नहीं था,
+        #     इसलिए अगली बार वही मरा हुआ प्रोसेस मिलता था और लॉगिन फेल होता था (फ़ोर्स स्टॉप के बाद ठीक)
+        try:
+            pp = '../../core/system/BProcessManagerService.java'
+            ps = open(pp, encoding='utf-8').read()
+            n_ok = 0
+            pairs = [
+                ('Map<String, ProcessRecord> process = mProcessMap.get(record.buid);',
+                 'Map<String, ProcessRecord> process = mProcessMap.get(BUserHandle.getUid(record.userId, record.buid));'),
+                ('mProcessMap.remove(record.buid);',
+                 'mProcessMap.remove(BUserHandle.getUid(record.userId, record.buid));'),
+                ('mProcessMap.remove(processRecord.buid);',
+                 'mProcessMap.remove(BUserHandle.getUid(processRecord.userId, processRecord.buid));'),
+                ('if (app.bActivityThread != null) {\n                        return app;\n                    }',
+                 'if (app.bActivityThread != null) {\n'
+                 '                        boolean alive = false;\n'
+                 '                        try {\n'
+                 '                            alive = app.bActivityThread.asBinder().isBinderAlive();\n'
+                 '                        } catch (Throwable ignored) {\n'
+                 '                        }\n'
+                 '                        if (alive) return app;\n'
+                 '                        Slog.w(TAG, "stale process record removed: " + processName);\n'
+                 '                        synchronized (mPidsSelfLocked) {\n'
+                 '                            mPidsSelfLocked.remove(app);\n'
+                 '                        }\n'
+                 '                    }'),
+            ]
+            for o, n in pairs:
+                if ps.count(o) == 1:
+                    ps = ps.replace(o, n)
+                    n_ok += 1
+                else:
+                    print('PROCESS PATCH piece not found:', o[:60], ps.count(o))
+            if n_ok:
+                open(pp, 'w', encoding='utf-8').write(ps)
+            print('PROCESS PATCH applied pieces:', n_ok, 'of', len(pairs))
+        except Exception as e:
+            print('PROCESS PATCH SKIPPED:', e)
         if ba:
             s = open(ba, encoding='utf-8').read()
             pat2 = re.compile(r'(void\s+handleBindApplication\s*\([^)]*\)\s*(?:throws\s+[\w\s,.]+)?\{)')
@@ -1160,6 +1229,29 @@ jobs:
         import com.example.virtualapp.data.IdentityStore
         import top.niunaijun.blackbox.BlackBoxCore
 
+        // हर कॉपी में Google Play Services अपने आप पक्की करो (फ़ोन में हो तो): इससे ऐप की "चेकिंग" हर बार चलती है
+        object GmsEnsure {
+            private val PKGS = listOf("com.google.android.gms", "com.google.android.gsf", "com.android.vending")
+
+            fun ensure(context: android.content.Context, copy: Int) {
+                for (p in PKGS) {
+                    try {
+                        context.packageManager.getPackageInfo(p, 0)
+                        if (!BlackBoxCore.get().isInstalled(p, copy)) {
+                            BlackBoxCore.get().installPackageAsUser(p, copy)
+                        }
+                    } catch (e: Throwable) {
+                    }
+                }
+                try {
+                    if (BlackBoxCore.get().isInstalled("com.google.android.gms", copy)) {
+                        IdentityStore.setGms(context, copy, true)
+                    }
+                } catch (e: Throwable) {
+                }
+            }
+        }
+
         // होम स्क्रीन शॉर्टकट से सीधे वर्चुअल ऐप खोलने वाली बिना-स्क्रीन की Activity
         class LaunchActivity : Activity() {
 
@@ -1176,6 +1268,7 @@ jobs:
                 IdentityStore.syncBridge(appCtx)
                 Thread {
                     try {
+                        GmsEnsure.ensure(appCtx, userId)
                         // पहले सीधे खोलने की कोशिश (वर्चुअल कॉपी पहले से हो तो असली ऐप ज़रूरी नहीं)
                         var ok = try {
                             BlackBoxCore.get().launchApk(pkg, userId)
@@ -1543,6 +1636,8 @@ jobs:
                 Toast.makeText(this, "वर्चुअल स्पेस में खोल रहे हैं...", Toast.LENGTH_SHORT).show()
                 Thread {
                     try {
+                        // हर कॉपी में Google Play Services पक्की करो (फ़ोन में हो तो)
+                        GmsEnsure.ensure(applicationContext, copy)
                         val installed = BlackBoxCore.get().installPackageAsUser(app.packageName, copy)
                         val launched = BlackBoxCore.get().launchApk(app.packageName, copy)
                         runOnUiThread {
