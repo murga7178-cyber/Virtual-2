@@ -1234,13 +1234,25 @@ jobs:
             private val PKGS = listOf("com.google.android.gms", "com.google.android.gsf", "com.android.vending")
 
             fun ensure(context: android.content.Context, copy: Int) {
+                var freshInstall = false
+                val report = StringBuilder()
                 for (p in PKGS) {
+                    val short = p.substringAfterLast('.')
                     try {
                         context.packageManager.getPackageInfo(p, 0)
+                    } catch (e: Throwable) {
+                        report.append("$short: फ़ोन में नहीं\n")
+                        continue
+                    }
+                    try {
                         if (!BlackBoxCore.get().isInstalled(p, copy)) {
                             BlackBoxCore.get().installPackageAsUser(p, copy)
+                            freshInstall = true
                         }
+                        val ok = BlackBoxCore.get().isInstalled(p, copy)
+                        report.append(if (ok) "$short: ✅ इंस्टॉल\n" else "$short: ❌ इंस्टॉल नहीं हुआ\n")
                     } catch (e: Throwable) {
+                        report.append("$short: ❌ ${e.javaClass.simpleName}\n")
                     }
                 }
                 try {
@@ -1249,7 +1261,23 @@ jobs:
                     }
                 } catch (e: Throwable) {
                 }
+                try {
+                    context.getSharedPreferences("gms_report", android.content.Context.MODE_PRIVATE)
+                        .edit().putString("copy_$copy", report.toString().trim()).apply()
+                } catch (e: Throwable) {
+                }
+                // अभी-अभी इंस्टॉल हुई Google सेवाओं को तैयार होने का थोड़ा समय दो
+                if (freshInstall) {
+                    try {
+                        Thread.sleep(2500)
+                    } catch (e: Throwable) {
+                    }
+                }
             }
+
+            fun lastReport(context: android.content.Context, copy: Int): String =
+                context.getSharedPreferences("gms_report", android.content.Context.MODE_PRIVATE)
+                    .getString("copy_$copy", "") ?: ""
         }
 
         // होम स्क्रीन शॉर्टकट से सीधे वर्चुअल ऐप खोलने वाली बिना-स्क्रीन की Activity
@@ -1342,6 +1370,35 @@ jobs:
 
             private val apps = mutableListOf<AppInfo>()
             private lateinit var adapter: AppListAdapter
+
+            // जो कॉपी अभी खोली गई: उससे वापस इस स्क्रीन पर आते ही वह कॉपी "फ़ोर्स स्टॉप" की तरह बंद होगी
+            private var launchedPkg: String? = null
+            private var launchedCopy = 0
+            private var pausedAfterLaunch = false
+
+            override fun onPause() {
+                super.onPause()
+                if (launchedPkg != null) pausedAfterLaunch = true
+            }
+
+            override fun onResume() {
+                super.onResume()
+                val pk = launchedPkg
+                if (pk != null && pausedAfterLaunch) {
+                    val c = launchedCopy
+                    launchedPkg = null
+                    pausedAfterLaunch = false
+                    Thread {
+                        try {
+                            BlackBoxCore.get().stopPackage(pk, c)
+                        } catch (e: Throwable) {
+                        }
+                        runOnUiThread {
+                            Toast.makeText(this, "कॉपी ${c + 1} बंद कर दी", Toast.LENGTH_SHORT).show()
+                        }
+                    }.start()
+                }
+            }
 
             override fun onCreate(savedInstanceState: Bundle?) {
                 super.onCreate(savedInstanceState)
@@ -1633,6 +1690,9 @@ jobs:
             // BlackBox के वर्चुअल स्पेस (कॉपी नंबर = यूज़र नंबर) में ऐप इंस्टॉल करके चलाओ
             private fun launchVirtual(app: AppInfo, copy: Int) {
                 IdentityStore.setLastCopy(this, app.packageName, copy)
+                launchedPkg = app.packageName
+                launchedCopy = copy
+                pausedAfterLaunch = false
                 Toast.makeText(this, "वर्चुअल स्पेस में खोल रहे हैं...", Toast.LENGTH_SHORT).show()
                 Thread {
                     try {
@@ -1847,6 +1907,7 @@ jobs:
                 val diffLine = if (others.isEmpty()) "ℹ️ यही अकेली कॉपी है"
                     else if (sameAsOther) "⚠️ इस कॉपी की कुछ ID दूसरी कॉपी से मिलती हैं"
                     else "✅ इस कॉपी की ID बाकी सब कॉपियों से अलग है (नंबर बदला हुआ)"
+                val gmsDetail = GmsEnsure.lastReport(this, copy).let { if (it.isEmpty()) "" else "\n" + it.replace("\n", "\n   ") }
                 val storage = "📁 स्टोरेज: इस कॉपी का अपना अलग /sdcard (दूसरी कॉपी से नहीं मिलता)"
                 val gms = if (IdentityStore.hasGms(this, copy)) "✅ Google Play Services: जोड़ी गई" else "➖ Google Play Services: नहीं जोड़ी"
 
@@ -1869,7 +1930,7 @@ jobs:
                     🔵 Bluetooth MAC: ${id.bluetoothMac}
                     📡 Mobile IP: ${id.mobileIp}
 
-                    $gms
+                    $gms$gmsDetail
 
                     $storage
                 """.trimIndent()
