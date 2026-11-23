@@ -345,9 +345,10 @@ jobs:
                 return result;
             }
 
-            // ऐप जब किसी दूसरी सेवा (जैसे Google Play Services) से जुड़ने (bind) की कोशिश करे तो उसका रिकॉर्ड रखो।
-            // विज्ञापन ID (GAID) और Install Referrer ऐसे ही फ़ोन की असली पहचान पढ़ते हैं और सारी कॉपियों में एक जैसे आते हैं,
-            // इसलिए पहली कॉपी के अलावा हर कॉपी में इन दोनों से जुड़ना रोक दो (ऐप को "उपलब्ध नहीं" मिलेगा, वह नए की तरह चलेगा)।
+            // ऐप जब किसी दूसरी सेवा से जुड़ने (bind) की कोशिश करे तो उसका रिकॉर्ड रखो।
+            // पहली कॉपी के अलावा हर कॉपी में: अगर Google की सेवा (GMS/GSF/Play Store, विज्ञापन ID, FCM, Install Referrer) माँगी जाए
+            // और वह कॉपी के अपने वर्चुअल Google में न मिले, तो BlackBox माँग को फ़ोन के असली Google तक पहुँचा देता था
+            // (जिससे असली विज्ञापन ID/पहचान सारी कॉपियों में एक जैसी जाती थी)। ऐसी माँग अब रोक दी जाती है।
             public static boolean shouldBlockBind(android.content.Intent intent) {
                 try {
                     if (intent == null) return false;
@@ -356,14 +357,24 @@ jobs:
                     String cp = c != null ? c.getPackageName() : intent.getPackage();
                     if (pkg != null && pkg.equals(cp)) return false;
                     String act = intent.getAction();
-                    String cls = c != null ? c.getClassName() : "";
-                    log("BIND", act != null ? act : (c != null ? c.flattenToShortString() : "?"));
-                    boolean ads = (act != null && act.contains("ads.identifier")) || cls.contains("AdvertisingIdService");
-                    boolean ref = (act != null && act.toUpperCase().contains("INSTALL_REFERRER")) || cls.contains("InstallReferrer");
-                    if ((ads || ref) && BActivityThread.getUserId() > 0
-                            && !BlackBoxCore.get().isInstalled("com.google.android.gms", BActivityThread.getUserId())) {
-                        log("BIND_BLOCKED", ads ? "advertising id" : "install referrer");
-                        return true;
+                    String what = act != null ? act : (c != null ? c.flattenToShortString() : "?");
+                    log("BIND", what);
+                    String tp = cp != null ? cp : "";
+                    boolean google = tp.equals("com.google.android.gms") || tp.equals("com.google.android.gsf")
+                            || tp.equals("com.android.vending")
+                            || (act != null && (act.startsWith("com.google.android.gms") || act.startsWith("com.google.android.c2dm")
+                            || act.contains("finsky") || act.toUpperCase().contains("INSTALL_REFERRER")));
+                    int uid = BActivityThread.getUserId();
+                    if (google && uid > 0) {
+                        boolean virtual = false;
+                        try {
+                            virtual = BlackBoxCore.getBPackageManager().resolveService(intent, 0, null, uid) != null;
+                        } catch (Throwable ignored) {
+                        }
+                        if (!virtual) {
+                            log("BIND_BLOCKED", "असली Google से बचाव: " + what);
+                            return true;
+                        }
                     }
                 } catch (Throwable ignored) {
                 }
