@@ -400,10 +400,34 @@ jobs:
 
             // वर्चुअल ऐप अपनी ही कोई स्क्रीन खोले और वो वर्चुअल कॉपी में न मिले, तो माँग असली Android को देने पर ऐप क्रैश हो जाता है।
             // ऐसे में उस माँग को चुपचाप छोड़ दो (स्क्रीन नहीं खुलेगी, पर ऐप चलता रहेगा)।
+            // ऐड/ऐप से Play Store खोलने की माँग (market://, play.google.com, com.android.vending) - इसे खुलने ही मत दो
+            public static boolean isStoreIntent(android.content.Intent intent) {
+                try {
+                    if (intent == null) return false;
+                    android.content.ComponentName c = intent.getComponent();
+                    String cp = c != null ? c.getPackageName() : intent.getPackage();
+                    if ("com.android.vending".equals(cp)) return true;
+                    android.net.Uri d = intent.getData();
+                    if (d != null) {
+                        String sc = d.getScheme();
+                        String host = d.getHost();
+                        if ("market".equals(sc)) return true;
+                        if (host != null && (host.equals("play.google.com") || host.equals("market.android.com"))) return true;
+                    }
+                } catch (Throwable ignored) {
+                }
+                return false;
+            }
+
             public static boolean shouldDropStart(android.content.Intent intent) {
                 try {
                     String pkg = BActivityThread.getAppPackageName();
                     if (intent == null || pkg == null) return false;
+                    if (isStoreIntent(intent)) {
+                        android.util.Log.e("VAPP_DBG", "STORE_DROPPED " + intent);
+                        log("STORE_DROPPED", String.valueOf(intent.getData()));
+                        return true;
+                    }
                     android.content.ComponentName comp = intent.getComponent();
                     boolean own = (comp != null && pkg.equals(comp.getPackageName()))
                             || (comp == null && pkg.equals(intent.getPackage()));
