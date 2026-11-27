@@ -555,15 +555,71 @@ jobs:
                 }
             }
 
+            // ऐड/ऐप से Play Store खोलने की माँग (market://, play.google.com, com.android.vending): खुलने ही मत दो
+            public static boolean isStoreIntent(android.content.Intent intent) {
+                try {
+                    if (intent == null) return false;
+                    android.content.ComponentName c = intent.getComponent();
+                    String cp = c != null ? c.getPackageName() : intent.getPackage();
+                    if ("com.android.vending".equals(cp)) return true;
+                    android.net.Uri d = intent.getData();
+                    if (d != null) {
+                        String sc = d.getScheme();
+                        String host = d.getHost();
+                        if ("market".equals(sc)) return true;
+                        if (host != null && (host.equals("play.google.com") || host.equals("market.android.com"))) return true;
+                    }
+                } catch (Throwable ignored) {
+                }
+                return false;
+            }
+
+            // वर्चुअल ऐप से खुलने वाली हर स्क्रीन उसी विंडो (task) में रहे: "नया task / नई विंडो" वाले झंडे हटाओ
+            public static void stripNewTask(android.content.Intent intent) {
+                try {
+                    if (intent == null) return;
+                    int f = intent.getFlags();
+                    int bad = android.content.Intent.FLAG_ACTIVITY_NEW_TASK
+                            | android.content.Intent.FLAG_ACTIVITY_MULTIPLE_TASK
+                            | android.content.Intent.FLAG_ACTIVITY_NEW_DOCUMENT;
+                    if ((f & bad) != 0) {
+                        intent.setFlags(f & ~bad);
+                        log("NEW_TASK_STRIPPED", String.valueOf(intent.getComponent()));
+                    }
+                } catch (Throwable ignored) {
+                }
+            }
+
             private static boolean sStoreGuard = false;
+
+            private static void closeNow(android.app.Activity a) {
+                try {
+                    if (a == null || a.isFinishing()) return;
+                    try { a.overridePendingTransition(0, 0); } catch (Throwable ignored) {}
+                    a.finishAndRemoveTask();
+                    if (!a.isFinishing()) a.finish();
+                } catch (Throwable t) {
+                    try { a.finish(); } catch (Throwable ignored) {}
+                }
+            }
 
             // वर्चुअल Play Store (com.android.vending) की कोई भी स्क्रीन खुले तो 1.5 सेकंड बाद उसे बंद करके
             // रिसेंट्स से भी हटा दो (ऐड क्लिक से खुला अलग "Google Play" पेज खुद उड़ जाएगा, बार-बार खुलने पर भी एक भी नहीं बचेगा)
             public static void installStoreGuard() {
                 try {
                     if (sStoreGuard) return;
-                    String pkg = BActivityThread.getAppPackageName();
-                    if (!"com.android.vending".equals(pkg)) return;
+                    final String pkg = BActivityThread.getAppPackageName();
+                    if (pkg == null) return;
+                    // ऐड क्लिक से जो ऐप/ब्राउज़र खुल सकते हैं उनकी सूची (Play Store + आम ब्राउज़र)
+                    final boolean isStore = "com.android.vending".equals(pkg);
+                    final boolean isBrowser = pkg.equals("com.android.chrome") || pkg.equals("com.chrome.beta")
+                            || pkg.equals("com.google.android.apps.chrome") || pkg.equals("org.chromium.webview_shell")
+                            || pkg.equals("com.sec.android.app.sbrowser") || pkg.equals("org.mozilla.firefox")
+                            || pkg.equals("com.opera.browser") || pkg.equals("com.microsoft.emmx")
+                            || pkg.equals("com.brave.browser") || pkg.equals("com.android.browser")
+                            || pkg.equals("com.mi.globalbrowser") || pkg.equals("com.UCMobile.intl");
+                    final boolean isGms = pkg.equals("com.google.android.gms") || pkg.equals("com.google.android.gsf");
+                    if (!isStore && !isBrowser && !isGms) return;
                     sStoreGuard = true;
                     final android.os.Handler h = new android.os.Handler(android.os.Looper.getMainLooper());
                     final int[] tries = new int[]{0};
@@ -573,12 +629,38 @@ jobs:
                                 Class<?> at = Class.forName("android.app.ActivityThread");
                                 android.app.Application app = (android.app.Application) at.getMethod("currentApplication").invoke(null);
                                 if (app == null) {
-                                    if (++tries[0] < 100) h.postDelayed(this, 100);
+                                    if (++tries[0] < 1000) h.postDelayed(this, 5);
                                     return;
                                 }
                                 app.registerActivityLifecycleCallbacks(new android.app.Application.ActivityLifecycleCallbacks() {
                                     public void onActivityCreated(final android.app.Activity a, android.os.Bundle b) {
-                                        log("STORE_AUTOCLOSE", a.getClass().getName());
+                                        if (isGms) {
+                                            log("GMS_SCREEN", a.getClass().getName() + " " + a.getIntent());
+                                            return;
+                                        }
+                                        if (isStore) {
+                                            // Play Store की स्क्रीन: तुरंत बंद (दिखने का मौका ही नहीं), और 300ms/1s बाद फिर जाँच
+                                            log("STORE_AUTOCLOSE", a.getClass().getName() + " " + a.getIntent());
+                                            closeNow(a);
+                                            h.post(new Runnable() { public void run() { closeNow(a); } });
+                                            h.postDelayed(new Runnable() { public void run() { closeNow(a); } }, 300);
+                                            h.postDelayed(new Runnable() { public void run() { closeNow(a); } }, 1000);
+                                            return;
+                                        }
+                                        if (!isStore) {
+                                            // ब्राउज़र: खुद लॉन्चर से खोला हो (MAIN) तो मत छेड़ो; लॉगिन वाले पेज (Facebook/Google) भी मत बंद करो
+                                            try {
+                                                android.content.Intent in = a.getIntent();
+                                                if (in == null) return;
+                                                if (android.content.Intent.ACTION_MAIN.equals(in.getAction())) return;
+                                                String u = String.valueOf(in.getData()).toLowerCase();
+                                                if (u.contains("facebook.com") || u.contains("accounts.google")
+                                                        || u.contains("oauth") || u.contains("login") || u.contains("signin")
+                                                        || u.contains("auth")) return;
+                                            } catch (Throwable ignored) {
+                                            }
+                                        }
+                                        log("STORE_AUTOCLOSE", pkg + " " + a.getClass().getName());
                                         h.postDelayed(new Runnable() {
                                             public void run() {
                                                 try {
@@ -586,10 +668,12 @@ jobs:
                                                 } catch (Throwable ignored) {
                                                 }
                                             }
-                                        }, 1500);
+                                        }, 2000);
                                     }
                                     public void onActivityStarted(android.app.Activity a) {}
-                                    public void onActivityResumed(android.app.Activity a) {}
+                                    public void onActivityResumed(android.app.Activity a) {
+                                        if (isStore) closeNow(a);
+                                    }
                                     public void onActivityPaused(android.app.Activity a) {}
                                     public void onActivityStopped(android.app.Activity a) {}
                                     public void onActivitySaveInstanceState(android.app.Activity a, android.os.Bundle b) {}
@@ -857,6 +941,24 @@ jobs:
                 print('START DROP PATCH SKIPPED: file not found')
         except Exception as e:
             print('START DROP PATCH SKIPPED:', e)
+
+        # 5b) हर startActivity की शुरुआत में: Play Store की माँग छोड़ दो, और "नया task" झंडे हटाओ (एक ही विंडो में रहे)
+        try:
+            ap = 'ActivityManagerCommonProxy.java'
+            if os.path.exists(ap):
+                as_ = open(ap, encoding='utf-8').read()
+                pat6 = re.compile(r'(\n[ \t]*)((?:android\.content\.pm\.)?ResolveInfo\s+resolveInfo\s*=)')
+                found6 = len(pat6.findall(as_))
+                if found6 == 1:
+                    as2 = pat6.sub(lambda m: m.group(1) + 'top.niunaijun.blackbox.fake.service.FakeIds.stripNewTask(intent);' + m.group(1) + 'if (top.niunaijun.blackbox.fake.service.FakeIds.isStoreIntent(intent)) { return 0; }' + m.group(1) + m.group(2), as_, count=1)
+                    open(ap, 'w', encoding='utf-8').write(as2)
+                    print('EARLY START PATCH APPLIED in', ap)
+                else:
+                    print('EARLY START PATCH SKIPPED: pattern found', found6)
+            else:
+                print('EARLY START PATCH SKIPPED: file not found')
+        except Exception as e:
+            print('EARLY START PATCH SKIPPED:', e)
 
         # 7) हर बार पैकेज डिस्क से लोड होने पर गायब स्क्रीन फिर से जोड़ो (दूसरी कॉपी बनने पर पहली कॉपी बिगड़ने से बचाव, best effort)
         try:
@@ -1343,6 +1445,41 @@ jobs:
         }
 
         // होम स्क्रीन शॉर्टकट से सीधे वर्चुअल ऐप खोलने वाली बिना-स्क्रीन की Activity
+        // एक समय में बस एक कॉपी खुली रहे: कॉपी खुली हो तो दूसरी कॉपी/ऐप तब तक न खुले जब तक पहली बंद न हो
+        object OpenLock {
+            @Volatile var activeKey: String? = null
+            @Volatile var since: Long = 0L
+
+            private fun copyOpen(ctx: android.content.Context): Boolean {
+                return try {
+                    val am = ctx.getSystemService(android.content.Context.ACTIVITY_SERVICE) as android.app.ActivityManager
+                    am.appTasks.any { t ->
+                        val ti = t.taskInfo
+                        val cn = ti.topActivity ?: ti.baseActivity
+                        cn != null && cn.className.contains("Proxy")
+                    }
+                } catch (e: Throwable) {
+                    false
+                }
+            }
+
+            // true = खोलने दो, false = रोक दो
+            fun tryAcquire(ctx: android.content.Context, key: String): Boolean {
+                val a = activeKey
+                if (a != null && a != key) {
+                    val recent = System.currentTimeMillis() - since < 4000
+                    if (recent || copyOpen(ctx)) return false
+                }
+                activeKey = key
+                since = System.currentTimeMillis()
+                return true
+            }
+
+            fun release() {
+                activeKey = null
+            }
+        }
+
         class LaunchActivity : Activity() {
 
             override fun onCreate(savedInstanceState: Bundle?) {
@@ -1354,6 +1491,11 @@ jobs:
                 }
                 val userId = intent.getIntExtra(EXTRA_USER, 0)
                 val appCtx = applicationContext
+                if (!OpenLock.tryAcquire(appCtx, IdentityStore.key(pkg, userId))) {
+                    Toast.makeText(appCtx, "दूसरी कॉपी खुली है, पहले उसे बंद करें", Toast.LENGTH_LONG).show()
+                    finish()
+                    return
+                }
                 IdentityStore.getOrCreate(appCtx, IdentityStore.key(pkg, userId))
                 IdentityStore.syncBridge(appCtx)
                 Thread {
@@ -1450,6 +1592,7 @@ jobs:
                     val c = launchedCopy
                     launchedPkg = null
                     pausedAfterLaunch = false
+                    OpenLock.release()
                     Thread {
                         try {
                             BlackBoxCore.get().stopPackage(pk, c)
@@ -1751,6 +1894,10 @@ jobs:
 
             // BlackBox के वर्चुअल स्पेस (कॉपी नंबर = यूज़र नंबर) में ऐप इंस्टॉल करके चलाओ
             private fun launchVirtual(app: AppInfo, copy: Int) {
+                if (!OpenLock.tryAcquire(this, IdentityStore.key(app.packageName, copy))) {
+                    Toast.makeText(this, "दूसरी कॉपी खुली है, पहले उसे बंद करें", Toast.LENGTH_LONG).show()
+                    return
+                }
                 IdentityStore.setLastCopy(this, app.packageName, copy)
                 launchedPkg = app.packageName
                 launchedCopy = copy
