@@ -590,6 +590,50 @@ jobs:
                 }
             }
 
+            private static boolean sTaskLabel = false;
+
+            // रिसेंट्स में कॉपी वाली विंडो का नाम "वर्चुअल ऐप 16" जैसा दिखे (कॉपी नंबर = यूज़र नंबर + 1),
+            // ताकि मुख्य लिस्ट वाले "वर्चुअल ऐप" से अलग पहचान आए
+            public static void installTaskLabel() {
+                try {
+                    if (sTaskLabel) return;
+                    sTaskLabel = true;
+                    final android.os.Handler h = new android.os.Handler(android.os.Looper.getMainLooper());
+                    final int[] tries = new int[]{0};
+                    h.post(new Runnable() {
+                        public void run() {
+                            try {
+                                Class<?> at = Class.forName("android.app.ActivityThread");
+                                android.app.Application app = (android.app.Application) at.getMethod("currentApplication").invoke(null);
+                                if (app == null) {
+                                    if (++tries[0] < 1000) h.postDelayed(this, 5);
+                                    return;
+                                }
+                                app.registerActivityLifecycleCallbacks(new android.app.Application.ActivityLifecycleCallbacks() {
+                                    private void label(android.app.Activity a) {
+                                        try {
+                                            String name = "वर्चुअल ऐप " + (BActivityThread.getUserId() + 1);
+                                            a.setTaskDescription(new android.app.ActivityManager.TaskDescription(name));
+                                        } catch (Throwable ignored) {
+                                        }
+                                    }
+                                    public void onActivityCreated(android.app.Activity a, android.os.Bundle b) { label(a); }
+                                    public void onActivityStarted(android.app.Activity a) { label(a); }
+                                    public void onActivityResumed(android.app.Activity a) { label(a); }
+                                    public void onActivityPaused(android.app.Activity a) {}
+                                    public void onActivityStopped(android.app.Activity a) {}
+                                    public void onActivitySaveInstanceState(android.app.Activity a, android.os.Bundle b) {}
+                                    public void onActivityDestroyed(android.app.Activity a) {}
+                                });
+                            } catch (Throwable t) {
+                                log("TASK_LABEL", "failed " + t);
+                            }
+                        }
+                    });
+                } catch (Throwable ignored) {
+                }
+            }
+
             private static boolean sStoreGuard = false;
 
             private static void closeNow(android.app.Activity a) {
@@ -693,6 +737,7 @@ jobs:
             public static void applyBuild() {
                 installLocaleGuard();
                 installStoreGuard();
+                installTaskLabel();
                 try {
                     if (sBuildApplied) return;
                     String[] row = readRow(currentKey());
@@ -1478,6 +1523,32 @@ jobs:
             fun release() {
                 activeKey = null
             }
+
+            // कॉपी बंद करने वाला काम चल रहा हो तो नया लॉन्च उसके ख़त्म होने तक रुके (वरना आधी-बंद कॉपी दोबारा खुलकर बिगड़ती है)
+            @Volatile var stopper: Thread? = null
+
+            fun waitStopped() {
+                try {
+                    stopper?.join(5000)
+                } catch (e: Throwable) {
+                }
+            }
+
+            // कॉपी की बची हुई वर्चुअल विंडो (proxy स्क्रीन) रिसेंट्स से हटाओ
+            fun closeProxyTasks(ctx: android.content.Context) {
+                try {
+                    val am = ctx.getSystemService(android.content.Context.ACTIVITY_SERVICE) as android.app.ActivityManager
+                    for (t in am.appTasks) {
+                        try {
+                            val ti = t.taskInfo
+                            val cn = ti.topActivity ?: ti.baseActivity
+                            if (cn != null && cn.className.contains("Proxy")) t.finishAndRemoveTask()
+                        } catch (e: Throwable) {
+                        }
+                    }
+                } catch (e: Throwable) {
+                }
+            }
         }
 
         class LaunchActivity : Activity() {
@@ -1499,8 +1570,16 @@ jobs:
                 IdentityStore.getOrCreate(appCtx, IdentityStore.key(pkg, userId))
                 IdentityStore.syncBridge(appCtx)
                 Thread {
+                    OpenLock.waitStopped()
                     try {
                         GmsEnsure.ensure(appCtx, userId)
+                        // हमेशा शुरू से खुले: पुरानी चलती कॉपी/विंडो हो तो पहले बंद
+                        try {
+                            OpenLock.closeProxyTasks(appCtx)
+                            BlackBoxCore.get().stopPackage(pkg, userId)
+                            Thread.sleep(250)
+                        } catch (e: Throwable) {
+                        }
                         // पहले सीधे खोलने की कोशिश (वर्चुअल कॉपी पहले से हो तो असली ऐप ज़रूरी नहीं)
                         var ok = try {
                             BlackBoxCore.get().launchApk(pkg, userId)
@@ -1593,15 +1672,28 @@ jobs:
                     launchedPkg = null
                     pausedAfterLaunch = false
                     OpenLock.release()
-                    Thread {
+                    val appCtx = applicationContext
+                    val t = Thread {
+                        // ऐप + उस कॉपी की Google सेवाएँ, सब बंद; 300ms बाद दोबारा (जो फिर से जी उठे उसके लिए)
+                        val all = listOf(pk) + GMS_PACKAGES
                         try {
-                            BlackBoxCore.get().stopPackage(pk, c)
+                            OpenLock.closeProxyTasks(appCtx)
+                            for (p in all) {
+                                try { BlackBoxCore.get().stopPackage(p, c) } catch (e: Throwable) { }
+                            }
+                            Thread.sleep(300)
+                            for (p in all) {
+                                try { BlackBoxCore.get().stopPackage(p, c) } catch (e: Throwable) { }
+                            }
+                            OpenLock.closeProxyTasks(appCtx)
                         } catch (e: Throwable) {
                         }
                         runOnUiThread {
                             Toast.makeText(this, "कॉपी ${c + 1} बंद कर दी", Toast.LENGTH_SHORT).show()
                         }
-                    }.start()
+                    }
+                    OpenLock.stopper = t
+                    t.start()
                 }
             }
 
@@ -1904,10 +1996,18 @@ jobs:
                 pausedAfterLaunch = false
                 Toast.makeText(this, "वर्चुअल स्पेस में खोल रहे हैं...", Toast.LENGTH_SHORT).show()
                 Thread {
+                    OpenLock.waitStopped()
                     try {
                         // हर कॉपी में Google Play Services पक्की करो (फ़ोन में हो तो)
                         GmsEnsure.ensure(applicationContext, copy)
                         val installed = BlackBoxCore.get().installPackageAsUser(app.packageName, copy)
+                        // हमेशा शुरू से खुले: पुरानी चलती कॉपी/विंडो हो तो पहले बंद
+                        try {
+                            OpenLock.closeProxyTasks(applicationContext)
+                            BlackBoxCore.get().stopPackage(app.packageName, copy)
+                            Thread.sleep(250)
+                        } catch (e: Throwable) {
+                        }
                         val launched = BlackBoxCore.get().launchApk(app.packageName, copy)
                         runOnUiThread {
                             Toast.makeText(
